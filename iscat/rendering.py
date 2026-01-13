@@ -62,7 +62,10 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
     print("Generating video frames and masks...")
     for f in tqdm(range(num_frames)):
         # Accumulators for the motion-blurred electric field of each particle.
-        blurred_particle_fields = [np.zeros((os_size, os_size), dtype=np.complex128) for _ in range(params["num_particles"])]
+        blurred_particle_fields = [
+            np.zeros((os_size, os_size), dtype=np.complex128)
+            for _ in range(params["num_particles"])
+        ]
 
         # --- Subsample rendering for motion blur ---
         for s in range(num_subsamples):
@@ -72,8 +75,10 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
             interp_factor = (current_time / dt) - frame_idx_floor
 
             # Linearly interpolate particle positions between trajectory points.
-            current_pos_nm = (1 - interp_factor) * trajectories[:, frame_idx_floor, :] + \
-                             interp_factor * trajectories[:, frame_idx_ceil, :]
+            current_pos_nm = (
+                (1 - interp_factor) * trajectories[:, frame_idx_floor, :] +
+                interp_factor * trajectories[:, frame_idx_ceil, :]
+            )
 
             for i in range(params["num_particles"]):
                 px, py, pz = current_pos_nm[i]
@@ -82,30 +87,41 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
                 E_sca_2D = ipsf_interpolators[i]([pz])[0]
                 
                 # Upscale to the oversampled resolution for higher accuracy placement.
-                resized_real = cv2.resize(np.real(E_sca_2D), (os_size, os_size), interpolation=cv2.INTER_LINEAR)
-                resized_imag = cv2.resize(np.imag(E_sca_2D), (os_size, os_size), interpolation=cv2.INTER_LINEAR)
+                resized_real = cv2.resize(
+                    np.real(E_sca_2D),
+                    (os_size, os_size),
+                    interpolation=cv2.INTER_LINEAR
+                )
+                resized_imag = cv2.resize(
+                    np.imag(E_sca_2D),
+                    (os_size, os_size),
+                    interpolation=cv2.INTER_LINEAR
+                )
                 E_sca_2D_rescaled = resized_real + 1j * resized_imag
-                
-                # --- Direct-space rendering to prevent wrapping artifacts from FFT-based convolution ---
-                E_sca_particle_inst = np.zeros((os_size, os_size), dtype=np.complex128)
-                center_x_px, center_y_px = int(round(px / pixel_size_nm * os_factor)), int(round(py / pixel_size_nm * os_factor))
-                psf_h, psf_w = E_sca_2D_rescaled.shape
-                top, left = center_y_px - psf_h // 2, center_x_px - psf_w // 2
 
-                # Define the overlapping region between the canvas and the PSF.
-                canvas_y_min, canvas_y_max = max(0, top), min(os_size, top + psf_h)
-                canvas_x_min, canvas_x_max = max(0, left), min(os_size, left + psf_w)
+                # --- Position the PSF on the oversampled canvas by circularly shifting it ---
+                # The PSF returned by the interpolator is centered in the array. We translate
+                # this pattern so that its center coincides with the particle's (x, y) position
+                # in the oversampled image grid. This avoids creating static rectangular
+                # support regions from zero-padding/cropping.
+                center_x_px = int(round(px / pixel_size_nm * os_factor))
+                center_y_px = int(round(py / pixel_size_nm * os_factor))
 
-                if not (canvas_y_min >= canvas_y_max or canvas_x_min >= canvas_x_max):
-                    psf_y_min, psf_y_max = canvas_y_min - top, canvas_y_max - top
-                    psf_x_min, psf_x_max = canvas_x_min - left, canvas_x_max - left
-                    
-                    # Add the relevant portion of the PSF to the canvas.
-                    E_sca_particle_inst[canvas_y_min:canvas_y_max, canvas_x_min:canvas_x_max] += \
-                        E_sca_2D_rescaled[psf_y_min:psf_y_max, psf_x_min:psf_x_max]
+                # Compute integer shifts relative to the optical center of the field of view.
+                shift_x = center_x_px - os_size // 2
+                shift_y = center_y_px - os_size // 2
+
+                # Circularly shift the PSF to the particle position.
+                E_sca_particle_inst = np.roll(
+                    E_sca_2D_rescaled,
+                    shift=(shift_y, shift_x),
+                    axis=(0, 1)
+                )
                 
                 # Apply signal multiplier and accumulate for motion blur.
-                blurred_particle_fields[i] += E_sca_particle_inst * params["particle_signal_multipliers"][i]
+                blurred_particle_fields[i] += (
+                    E_sca_particle_inst * params["particle_signal_multipliers"][i]
+                )
 
         # Average the fields from all subsamples to create the final motion-blurred field.
         for i in range(params["num_particles"]):
@@ -122,13 +138,17 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
                 
                 # Create a binary mask by thresholding the particle's own signal strength.
                 max_val = np.max(np.abs(contrast_final))
-                if max_val > 1e-9: # Avoid division by zero for invisible particles.
+                if max_val > 1e-9:  # Avoid division by zero for invisible particles.
                     normalized_contrast = np.abs(contrast_final) / max_val
                     mask = (normalized_contrast > params["mask_threshold"]).astype(np.uint8) * 255
-                else: # If particle has no signal, generate an empty mask.
+                else:  # If particle has no signal, generate an empty mask.
                     mask = np.zeros(final_size, dtype=np.uint8)
 
-                mask_path = os.path.join(params["mask_output_directory"], f"particle_{i+1}", f"frame_{f:04d}.png")
+                mask_path = os.path.join(
+                    params["mask_output_directory"],
+                    f"particle_{i+1}",
+                    f"frame_{f:04d}.png"
+                )
                 cv2.imwrite(mask_path, mask)
 
         # --- Final Video Frame Generation ---
