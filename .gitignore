@@ -1,0 +1,5 @@
+.DS_Store
+*.rtf
+update.py
+.backup_state/
+__pycache__/
