@@ -16,9 +16,17 @@ def apply_background_subtraction(signal_frames, reference_frames, params):
             Computes (Signal - Reference) / Reference on a per-frame basis.
 
         - 'video_mean':
-            Computes the temporal mean of all raw signal frames and subtracts
-            this mean from each signal frame:
-                Contrast = Signal - mean(Signal over time)
+            Estimates a static background frame from the entire video and
+            subtracts this background from each signal frame. In this
+            implementation, the background is taken to be the per-pixel
+            temporal median of all raw signal frames:
+
+                B(x, y) = median_t Signal_t(x, y)
+                Contrast_t(x, y) = Signal_t(x, y) - B(x, y)
+
+            This robustly removes a static background while avoiding the
+            "burned-in" negative trails that arise when using a simple
+            temporal mean for moving particles.
 
     After computing the contrast frames, the function performs intensity
     windowing by finding the 0.5 and 99.5 percentile values across the entire
@@ -62,21 +70,30 @@ def apply_background_subtraction(signal_frames, reference_frames, params):
             subtracted_frames.append(subtracted)
 
     elif method == "video_mean":
-        # Contrast = Signal - mean(Signal over time)
+        # Robust background subtraction from a single video:
+        #   1. Build a per-pixel temporal median background frame:
+        #        B(x,y) = median_t Signal_t(x,y)
+        #   2. Subtract this background from each frame:
+        #        Contrast_t(x,y) = Signal_t(x,y) - B(x,y)
+        #
         # The reference frames are not used in this method.
-        print("Applying background subtraction using temporal mean of signal frames...")
-        # Compute temporal mean of the signal frames in floating point.
-        # We use an explicit accumulation to avoid creating a massive stack if
-        # the number of frames is very large.
-        mean_frame = np.zeros_like(signal_frames[0], dtype=np.float64)
-        num_frames = len(signal_frames)
-        for frame in signal_frames:
-            mean_frame += frame.astype(np.float64)
-        mean_frame /= num_frames
+        print("Applying background subtraction using temporal median of signal frames (video_mean method)...")
 
-        # Subtract the temporal mean from each frame.
+        num_frames = len(signal_frames)
+        frame_shape = signal_frames[0].shape
+
+        # Stack all signal frames into a 3D array for per-pixel median calculation.
+        # Use float32 to balance precision and memory usage.
+        signal_stack = np.empty((num_frames, frame_shape[0], frame_shape[1]), dtype=np.float32)
+        for idx, frame in enumerate(signal_frames):
+            signal_stack[idx] = frame  # automatic upcast from uint16 to float32
+
+        # Compute the per-pixel temporal median as the background estimate.
+        background_frame = np.median(signal_stack, axis=0)
+
+        # Subtract the background from each frame to obtain contrast frames.
         for frame in tqdm(signal_frames, total=num_frames):
-            subtracted = frame.astype(np.float64) - mean_frame
+            subtracted = frame.astype(np.float32) - background_frame
             subtracted_frames.append(subtracted)
 
     else:
