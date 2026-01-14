@@ -29,7 +29,7 @@
        tqdm==4.67.1
    ```
 
-6. Run the simulation (from inside the `iscat` folder where `main.py` lives):
+6. Run the simulation (from inside the `iscat` folder where `main.py` is):
    ```bash
    cd iscat
    python main.py
