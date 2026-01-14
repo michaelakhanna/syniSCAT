@@ -67,7 +67,7 @@ PARAMS = {
     # Method for converting raw signal/reference into contrast frames in post-processing:
     #   'reference_frame' -> (Signal - Reference) / Reference
     #   'video_mean'      -> Signal - mean(Signal over time)
-    "background_subtraction_method": "video_mean",
+    "background_subtraction_method": "reference_frame",
 
     # --- MOTION BLUR ---
     "motion_blur_enabled": True,       # Enable/disable motion blur simulation
