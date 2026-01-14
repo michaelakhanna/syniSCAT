@@ -6,7 +6,7 @@ PARAMS = {
     # --- IMAGE & VIDEO ---
     "image_size_pixels": 1024,       # Size of the output image in pixels (e.g., 512x512)
     "pixel_size_nm": 600,            # Physical size of one pixel in nanometers
-    "fps": 30,                       # Frames per second of the output video
+    "fps": 24,                       # Frames per second of the output video
     "duration_seconds": 1,           # Total duration of the simulation video
     "bit_depth": 16,                 # Bit depth of the raw simulated frames (e.g., 16 for iSCAT, 12 for fluorescence)
     "output_filename": os.path.join(
