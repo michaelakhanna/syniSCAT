@@ -24,6 +24,7 @@ PARAMS = {
     ),                                # Base folder for masks
     "mask_threshold": 0.3,            # Threshold for binarizing the mask (0.0 to 1.0 of particle's max signal)
     "trackability_confidence_threshold": 0.8,  # Minimum confidence in [0, 1] to keep generating masks for a particle
+    "trackability_enabled": False,     # Master switch: if False, the trackability model does not gate masks or stop video early
 
     # --- OPTICAL SETUP ---
     "wavelength_nm": 635,             # Illumination wavelength in vacuum (nm)
