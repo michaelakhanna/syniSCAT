@@ -1,10 +1,12 @@
 import os
 import warnings
+
 import numpy as np
 import cv2
 
 # Import simulation components from other files
 from config import PARAMS
+from materials import resolve_particle_refractive_indices
 from trajectory import simulate_trajectories
 from optics import compute_ipsf_stack
 from rendering import generate_video_and_masks
@@ -32,38 +34,54 @@ def main():
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
+    # --- Resolve per-particle refractive indices from materials/overrides ---
+    # This combines:
+    #   - PARAMS["particle_materials"] (if provided) -> material-based lookup, and
+    #   - PARAMS["particle_refractive_indices"] (if provided) -> explicit overrides.
+    #
+    # The result is a single complex refractive index per particle, stored back
+    # into PARAMS["particle_refractive_indices"] as a numpy array. This ensures
+    # subsequent optics code sees a consistent, resolved value regardless of how
+    # the user specified the particle properties.
+    particle_refractive_indices = resolve_particle_refractive_indices(PARAMS)
+    diameters_nm = PARAMS["particle_diameters_nm"]
+
     # --- Step 1: Simulate particle movement ---
     # This generates the 3D coordinates for each particle over time.
     trajectories_nm = simulate_trajectories(PARAMS)
 
     # --- Step 2: Compute unique iPSF stacks ---
-    # To save computation time, only compute the iPSF once for each unique type of particle.
+    # To save computation time, only compute the iPSF once for each unique type
+    # of particle. A unique particle type is defined by its diameter and complex
+    # refractive index (n + i k) within the medium.
     unique_particles = {}
     print("Pre-computing unique particle iPSF stacks...")
-    for i in range(PARAMS["num_particles"]):
-        # A unique particle is defined by its diameter and refractive index.
+    num_particles = PARAMS["num_particles"]
+
+    for i in range(num_particles):
+        n_complex = particle_refractive_indices[i]
         key = (
-            PARAMS["particle_diameters_nm"][i],
-            PARAMS["particle_refractive_indices"][i].real,
-            PARAMS["particle_refractive_indices"][i].imag,
+            diameters_nm[i],
+            float(n_complex.real),
+            float(n_complex.imag),
         )
         if key not in unique_particles:
             unique_particles[key] = compute_ipsf_stack(
                 PARAMS,
-                PARAMS["particle_diameters_nm"][i],
-                PARAMS["particle_refractive_indices"][i],
+                diameters_nm[i],
+                n_complex,
             )
 
     # Assign the correct pre-computed iPSF interpolator to each particle.
     ipsf_interpolators = [
         unique_particles[
             (
-                PARAMS["particle_diameters_nm"][i],
-                PARAMS["particle_refractive_indices"][i].real,
-                PARAMS["particle_refractive_indices"][i].imag,
+                diameters_nm[i],
+                float(particle_refractive_indices[i].real),
+                float(particle_refractive_indices[i].imag),
             )
         ]
-        for i in range(PARAMS["num_particles"])
+        for i in range(num_particles)
     ]
 
     # --- Step 3: Generate raw video frames and masks ---
