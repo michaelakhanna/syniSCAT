@@ -55,6 +55,13 @@ PARAMS = {
     "z_stack_range_nm": 30000,        # Axial range for pre-computing the iPSF stack (e.g., +/- 10 um)
     "z_stack_step_nm": 50,            # Axial step size for the iPSF stack
 
+    # --- PSF PLACEMENT & PADDING ---
+    # Fraction of the on-axis PSF intensity at which its contribution is
+    # considered negligible when deciding how much extra padding to render
+    # around the field of view. Smaller values keep more PSF rings (larger
+    # padding and more compute); larger values cut the PSF earlier.
+    "psf_intensity_fraction_threshold": 1e-3,
+
     # --- ABERRATIONS & PUPIL FUNCTION ---
     "spherical_aberration_strength": 0.25,
     "apodization_factor": 1.8,
