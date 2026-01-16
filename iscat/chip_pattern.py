@@ -144,35 +144,11 @@ def generate_reference_and_background_maps(
           spatial maps. Currently, "gold_holes_v1" with presets
           "default_gold_holes" and "lab_default_gold_holes" are supported.
 
-    Args:
-        params (dict):
-            Global simulation parameter dictionary (PARAMS). Must contain:
-                - "reference_field_amplitude"
-                - "background_intensity"
-                - "pixel_size_nm"
-                - "psf_oversampling_factor"
-            and for chip patterns:
-                - "chip_pattern_enabled"
-                - "chip_pattern_model"
-                - "chip_substrate_preset"
-                - "chip_pattern_dimensions" (dict), when using gold_holes_v1
-        fov_shape_os (tuple[int, int]):
-            (height, width) of the oversampled field-of-view grid
-            (without PSF padding).
-        final_fov_shape (tuple[int, int]):
-            (height, width) of the final video frames.
-
-    Returns:
-        tuple:
-            E_ref_os (np.ndarray):
-                Complex 2D array of shape fov_shape_os containing the reference
-                field E_ref(x, y) on the oversampled field of view.
-            E_ref_final (np.ndarray):
-                Complex 2D array of shape final_fov_shape containing the
-                reference field at the final image resolution.
-            background_final (np.ndarray):
-                Float 2D array of shape final_fov_shape containing the
-                background intensity in camera counts for each pixel.
+    Note:
+        This function is intentionally time-independent. Any temporal evolution
+        of the chip pattern contrast is applied at render time via
+        `compute_contrast_scale_for_frame` and the reconstructed dimensionless
+        pattern maps.
     """
     E_ref_amplitude = float(params["reference_field_amplitude"])
     background_intensity = float(params["background_intensity"])
@@ -207,7 +183,7 @@ def generate_reference_and_background_maps(
         )
 
     # Only gold-hole presets are implemented at this stage. This can be extended
-    # to additional substrates (e.g., nanopillars) later without changing the
+       # to additional substrates (e.g., nanopillars) later without changing the
     # interface of this function.
     if substrate_preset not in ("default_gold_holes", "lab_default_gold_holes"):
         raise ValueError(
@@ -300,3 +276,85 @@ def generate_reference_and_background_maps(
     background_final = (background_intensity * pattern_final).astype(float)
 
     return E_ref_os, E_ref_final, background_final
+
+
+def compute_contrast_scale_for_frame(
+    params: dict,
+    frame_index: int,
+    num_frames: int,
+) -> float:
+    """
+    Compute the scalar contrast scale factor for the chip pattern in a given
+    frame, based on the selected chip_pattern_contrast_model.
+
+    The scale factor alpha_f returned by this function is used to modulate the
+    deviation of the dimensionless pattern from unity:
+
+        p_frame(x, y) = 1 + alpha_f * (p_base(x, y) - 1),
+
+    where p_base(x, y) is the base pattern with mean 1.0. With this
+    construction, the global mean of p_frame remains 1.0 for any alpha_f in
+    [0, 1], so the overall brightness is controlled purely by
+    background_intensity.
+
+    Supported models:
+        - "static":
+            alpha_f = 1.0 for all frames (no temporal contrast change).
+
+        - "time_dependent_v1":
+            alpha_f decays linearly from 1.0 at the first frame to
+            1.0 - A at the last frame, where A is given by
+            PARAMS["chip_pattern_contrast_amplitude"] in [0, 1]. This models a
+            deterministic, monotonic reduction in chip-pattern contrast over
+            the duration of the video (e.g., due to slow external drifts).
+
+    Args:
+        params (dict): Global simulation parameter dictionary (PARAMS).
+        frame_index (int): Zero-based index of the current frame.
+        num_frames (int): Total number of frames in the video.
+
+    Returns:
+        float: Contrast scale factor alpha_f.
+
+    Raises:
+        ValueError: If an unsupported contrast model is selected or if the
+            frame index is out of range.
+    """
+    if num_frames <= 0:
+        raise ValueError("num_frames must be positive when computing contrast scale.")
+    if frame_index < 0 or frame_index >= num_frames:
+        raise ValueError(
+            f"frame_index={frame_index} is out of range for num_frames={num_frames}."
+        )
+
+    model_raw = params.get("chip_pattern_contrast_model", "static")
+    model = str(model_raw).strip().lower()
+
+    if model == "static":
+        # No temporal evolution: always use the base pattern.
+        return 1.0
+
+    if model == "time_dependent_v1":
+        # Maximum fractional reduction in contrast A, clamped to [0, 1].
+        amplitude = float(params.get("chip_pattern_contrast_amplitude", 0.5))
+        if amplitude <= 0.0:
+            return 1.0
+        if amplitude > 1.0:
+            amplitude = 1.0
+
+        # Normalized time coordinate in [0, 1]. For a single-frame video, we
+        # treat the contrast as unchanged.
+        if num_frames == 1:
+            t_frac = 0.0
+        else:
+            t_frac = frame_index / float(num_frames - 1)
+
+        # Linear decay from alpha = 1.0 at the first frame to
+        # alpha = 1.0 - amplitude at the last frame.
+        alpha = 1.0 - amplitude * t_frac
+        return float(alpha)
+
+    raise ValueError(
+        f"Unsupported chip_pattern_contrast_model '{model_raw}'. "
+        "Supported models are 'static' and 'time_dependent_v1'."
+    )

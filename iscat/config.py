@@ -94,8 +94,14 @@ PARAMS = {
     # Use "none" to force a uniform background even if chip_pattern_enabled is True.
     "chip_pattern_model": "gold_holes_v1",
     # Contrast evolution model for the chip pattern. "static" means time-invariant
-    # contrast; time-dependent models can be added later.
-    "chip_pattern_contrast_model": "static",
+    # contrast; "time_dependent_v1" means the contrast linearly decaying alpha_f
+    "chip_pattern_contrast_model": "time_dependent_v1",
+    # Maximum fractional reduction in chip-pattern contrast for time-dependent
+    # models (e.g., "time_dependent_v1"). A value of 0.0 leaves the contrast
+    # unchanged; 0.5 means the contrast decays from 100% to 50% over theduration of the video. This parameter has no effect when the contrast
+    # duration of the video. This parameter has no effect when the contrast  model is "static".
+    "chip_pattern_contrast_amplitude": 0.5,
+
     # Substrate/background preset:
     #   "empty_background"       -> no chip pattern (uniform background)
     #   "default_gold_holes"     -> gold film with circular holes using the
