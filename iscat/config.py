@@ -167,7 +167,7 @@ PARAMS = {
     #
     # Additional models such as "surface_interaction_v1" may be added later;
     # for now, any value other than "unconstrained" is treated as invalid.
-    "z_motion_constraint_model": "unconstrained",
+    "z_motion_constraint_model": "surface_interaction_v1",
 
     # --- iPSF & SCATTERING CALCULATION ---
     # Oversampling factor for the internal PSF/canvas resolution.

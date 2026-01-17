@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 
@@ -111,6 +112,279 @@ def _generate_gold_hole_pattern(
     return pattern
 
 
+def is_position_in_chip_solid(params: dict, x_nm: float, y_nm: float) -> bool:
+    """
+    Determine whether a lateral position (x_nm, y_nm) lies inside a solid region
+    of the configured chip/substrate pattern.
+
+    This function is used by the Brownian motion simulator to enforce the
+    design requirement that particles cannot occupy space where gold or other
+    solid structures are present (CDD Sections 3.2 and 3.6). It operates in
+    continuous physical coordinates so it can be called per Brownian step
+    without constructing any additional images.
+
+    Current behavior:
+
+        - If `chip_pattern_enabled` is False, or `chip_substrate_preset` is
+          "empty_background", or `chip_pattern_model` is "none", the function
+          always returns False (no solid regions are modeled).
+
+        - For `chip_pattern_model == "gold_holes_v1"` with `chip_substrate_preset`
+          in {"default_gold_holes", "lab_default_gold_holes"}, the substrate is
+          modeled as a gold film with circular holes on a square grid. The gold
+          film is treated as occupying all lateral area outside the holes. The
+          function returns True when the given (x_nm, y_nm) projects into the
+          gold film (solid) and False when it lands inside a hole (fluid).
+
+    Future chip pattern models and substrate presets can extend this function
+    in a backward-compatible way by adding additional geometry branches.
+
+    Args:
+        params (dict): Global simulation parameter dictionary (PARAMS).
+        x_nm (float): Lateral x-position of the particle center in nanometers,
+            measured from the field-of-view corner (same convention as
+            simulate_trajectories and rendering).
+        y_nm (float): Lateral y-position of the particle center in nanometers,
+            measured from the field-of-view corner.
+
+    Returns:
+        bool: True if the position lies inside a solid region of the chip/
+        substrate (e.g., gold film), False otherwise.
+    """
+    chip_enabled = bool(params.get("chip_pattern_enabled", False))
+    if not chip_enabled:
+        return False
+
+    pattern_model_raw = params.get("chip_pattern_model", "none")
+    pattern_model = str(pattern_model_raw).strip().lower()
+
+    substrate_preset_raw = params.get("chip_substrate_preset", "empty_background")
+    substrate_preset = str(substrate_preset_raw).strip().lower()
+
+    # No solid structure when the background is empty or the pattern model is
+    # explicitly disabled.
+    if substrate_preset == "empty_background" or pattern_model == "none":
+        return False
+
+    # Only gold-holes substrates are modeled as solid regions at this stage.
+    if pattern_model != "gold_holes_v1":
+        # For unimplemented pattern models we conservatively treat the domain
+        # as fluid everywhere so that enabling such a model does not silently
+        # introduce inconsistent dynamics.
+        return False
+
+    if substrate_preset not in ("default_gold_holes", "lab_default_gold_holes"):
+        # Unknown substrate preset for this pattern model; treat as no solid
+        # regions for now. When additional substrate presets are implemented,
+        # they should be added explicitly here.
+        return False
+
+    # Geometry parameters for the gold film with circular holes. For the lab
+    # default preset we apply canonical values when the user has not overridden
+    # them; for the generic default preset we use the values exactly as given
+    # (with the same fallbacks).
+    dims = params.get("chip_pattern_dimensions", {})
+    if not isinstance(dims, dict):
+        raise TypeError(
+            "PARAMS['chip_pattern_dimensions'] must be a dictionary when "
+            "substrate exclusion is used with 'gold_holes_v1'."
+        )
+
+    if substrate_preset == "lab_default_gold_holes":
+        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
+        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
+    else:  # "default_gold_holes"
+        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
+        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
+
+    if hole_diameter_um <= 0.0:
+        raise ValueError(
+            "chip_pattern_dimensions['hole_diameter_um'] must be positive "
+            "when substrate exclusion is active."
+        )
+    if hole_edge_to_edge_spacing_um < 0.0:
+        raise ValueError(
+            "chip_pattern_dimensions['hole_edge_to_edge_spacing_um'] must be "
+            "non-negative when substrate exclusion is active."
+        )
+
+    pitch_um = hole_diameter_um + hole_edge_to_edge_spacing_um
+    if pitch_um <= 0.0:
+        raise ValueError(
+            "Computed pitch (hole_diameter_um + hole_edge_to_edge_spacing_um) "
+            "must be positive when substrate exclusion is active."
+        )
+
+    radius_um = hole_diameter_um / 2.0
+
+    # Field-of-view geometry in nanometers. We convert to a centered coordinate
+    # system that matches the pattern generation convention: the origin is at
+    # the center of the field of view.
+    img_size_pixels = int(params["image_size_pixels"])
+    pixel_size_nm = float(params["pixel_size_nm"])
+    if img_size_pixels <= 0 or pixel_size_nm <= 0.0:
+        raise ValueError(
+            "PARAMS['image_size_pixels'] and PARAMS['pixel_size_nm'] must be "
+            "positive when substrate exclusion is active."
+        )
+
+    img_size_nm = img_size_pixels * pixel_size_nm
+
+    x_nm_centered = float(x_nm) - img_size_nm / 2.0
+    y_nm_centered = float(y_nm) - img_size_nm / 2.0
+
+    x_um = x_nm_centered * 1e-3
+    y_um = y_nm_centered * 1e-3
+
+    # Map the position into the canonical unit cell of the hole lattice using
+    # the same periodic wrapping as in _generate_gold_hole_pattern.
+    half_pitch = pitch_um / 2.0
+    dx_um = (x_um + half_pitch) % pitch_um - half_pitch
+    dy_um = (y_um + half_pitch) % pitch_um - half_pitch
+
+    r_um = math.hypot(dx_um, dy_um)
+
+    inside_hole = (r_um <= radius_um)
+
+    # In this geometry, the gold film occupies all area outside the holes.
+    # The particle cannot occupy space where gold is present, so any position
+    # outside a hole is considered "solid" from the perspective of Brownian
+    # motion.
+    return not inside_hole
+
+
+def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> tuple:
+    """
+    Given a lateral position (x_nm, y_nm), project it into the nearest fluid
+    region of the chip (i.e., inside a hole) if it currently lies in a solid
+    (gold) region.
+
+    This function is used to correct Brownian steps that would otherwise place
+    the particle center inside the solid chip/substrate. It preserves the
+    underlying random step statistics (no resampling) by deterministically
+    mapping such positions back to the nearest point inside the hole, just
+    inside the gold/fluid boundary.
+
+    Behavior is defined only for:
+        chip_pattern_enabled = True,
+        chip_pattern_model  = "gold_holes_v1",
+        chip_substrate_preset in {"default_gold_holes", "lab_default_gold_holes"}.
+
+    For all other configurations, the input position is returned unchanged.
+
+    Args:
+        params (dict): Global simulation parameter dictionary (PARAMS).
+        x_nm (float): Lateral x-position of the particle center in nanometers.
+        y_nm (float): Lateral y-position of the particle center in nanometers.
+
+    Returns:
+        tuple[float, float]: Corrected (x_nm, y_nm) in nanometers, guaranteed
+        (under the supported configurations) to lie in a fluid region.
+    """
+    # If there is no substrate exclusion or the position is already fluid,
+    # return it unchanged.
+    if not is_position_in_chip_solid(params, x_nm, y_nm):
+        return float(x_nm), float(y_nm)
+
+    chip_enabled = bool(params.get("chip_pattern_enabled", False))
+    pattern_model_raw = params.get("chip_pattern_model", "none")
+    pattern_model = str(pattern_model_raw).strip().lower()
+    substrate_preset_raw = params.get("chip_substrate_preset", "empty_background")
+    substrate_preset = str(substrate_preset_raw).strip().lower()
+
+    if (
+        (not chip_enabled)
+        or pattern_model != "gold_holes_v1"
+        or substrate_preset not in ("default_gold_holes", "lab_default_gold_holes")
+    ):
+        # Unsupported configuration for projection logic; leave position as-is.
+        return float(x_nm), float(y_nm)
+
+    # Geometry parameters (same as in is_position_in_chip_solid).
+    dims = params.get("chip_pattern_dimensions", {})
+    if not isinstance(dims, dict):
+        raise TypeError(
+            "PARAMS['chip_pattern_dimensions'] must be a dictionary when "
+            "substrate exclusion is used with 'gold_holes_v1'."
+        )
+
+    if substrate_preset == "lab_default_gold_holes":
+        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
+        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
+    else:
+        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
+        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
+
+    if hole_diameter_um <= 0.0:
+        raise ValueError(
+            "chip_pattern_dimensions['hole_diameter_um'] must be positive "
+            "when substrate exclusion is active."
+        )
+    if hole_edge_to_edge_spacing_um < 0.0:
+        raise ValueError(
+            "chip_pattern_dimensions['hole_edge_to_edge_spacing_um'] must be "
+            "non-negative when substrate exclusion is active."
+        )
+
+    pitch_um = hole_diameter_um + hole_edge_to_edge_spacing_um
+    radius_um = hole_diameter_um / 2.0
+
+    img_size_pixels = int(params["image_size_pixels"])
+    pixel_size_nm = float(params["pixel_size_nm"])
+    if img_size_pixels <= 0 or pixel_size_nm <= 0.0:
+        raise ValueError(
+            "PARAMS['image_size_pixels'] and PARAMS['pixel_size_nm'] must be "
+            "positive when substrate exclusion is active."
+        )
+
+    img_size_nm = img_size_pixels * pixel_size_nm
+
+    # Centered coordinates in nm and um.
+    x_nm_centered = float(x_nm) - img_size_nm / 2.0
+    y_nm_centered = float(y_nm) - img_size_nm / 2.0
+
+    x_um = x_nm_centered * 1e-3
+    y_um = y_nm_centered * 1e-3
+
+    # Map into unit cell.
+    half_pitch = pitch_um / 2.0
+    dx_um = (x_um + half_pitch) % pitch_um - half_pitch
+    dy_um = (y_um + half_pitch) % pitch_um - half_pitch
+    r_um = math.hypot(dx_um, dy_um)
+
+    # If for some reason we are already in the hole (should not happen here),
+    # leave unchanged.
+    if r_um <= radius_um or r_um == 0.0:
+        return float(x_nm), float(y_nm)
+
+    # Project radially from the current position in the unit cell to just
+    # inside the hole boundary.
+    # Use a small inward offset (1 nm) to avoid numerical ambiguity exactly
+    # on the boundary.
+    r_target_um = max(radius_um - 1e-3, 0.0)  # 1e-3 µm = 1 nm
+    scale = r_target_um / r_um if r_um > 0.0 else 0.0
+
+    new_dx_um = dx_um * scale
+    new_dy_um = dy_um * scale
+
+    # Compute how much we moved within the unit cell.
+    delta_dx_um = new_dx_um - dx_um
+    delta_dy_um = new_dy_um - dy_um
+
+    # Apply the same deltas in the global (centered) coordinates. This keeps
+    # the particle in the same lattice cell while pushing it into the hole.
+    new_x_um = x_um + delta_dx_um
+    new_y_um = y_um + delta_dy_um
+
+    new_x_nm_centered = new_x_um * 1e3
+    new_y_nm_centered = new_y_um * 1e3
+
+    new_x_nm = new_x_nm_centered + img_size_nm / 2.0
+    new_y_nm = new_y_nm_centered + img_size_nm / 2.0
+
+    return float(new_x_nm), float(new_y_nm)
+
+
 def generate_reference_and_background_maps(
     params: dict,
     fov_shape_os: tuple,
@@ -135,6 +409,10 @@ def generate_reference_and_background_maps(
     satisfies the design requirement that the pattern be part of the physical
     image formation (via E_ref) and the noise model (via background_intensity),
     while keeping the rest of the rendering pipeline unchanged.
+
+    The same geometric parameters that define the pattern here are also used
+    by is_position_in_chip_solid / project_position_to_fluid_region to enforce
+    substrate exclusion in the Brownian motion simulation.
 
     Behavior:
         - If chip_pattern_enabled is False, or chip_substrate_preset is
@@ -183,7 +461,7 @@ def generate_reference_and_background_maps(
         )
 
     # Only gold-hole presets are implemented at this stage. This can be extended
-       # to additional substrates (e.g., nanopillars) later without changing the
+    # to additional substrates (e.g., nanopillars) later without changing the
     # interface of this function.
     if substrate_preset not in ("default_gold_holes", "lab_default_gold_holes"):
         raise ValueError(
