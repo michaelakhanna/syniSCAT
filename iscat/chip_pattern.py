@@ -31,9 +31,12 @@ def _generate_gold_hole_pattern(
         shape (tuple[int, int]): (height, width) of the desired pattern map.
         pixel_size_nm (float): Physical pixel size in nanometers for this grid.
         hole_diameter_um (float): Hole diameter in micrometers.
-        hole_edge_to_edge_spacing_um (float): Gold spacing between hole edges in micrometers.
-        hole_intensity_factor (float): Relative background intensity inside holes.
-        gold_intensity_factor (float): Relative background intensity in gold regions.
+        hole_edge_to_edge_spacing_um (float): Gold spacing between hole edges
+            in micrometers.
+        hole_intensity_factor (float): Relative background intensity inside
+            holes.
+        gold_intensity_factor (float): Relative background intensity in gold
+            regions.
 
     Returns:
         np.ndarray: 2D array of shape `shape`, dtype float, dimensionless
@@ -59,12 +62,17 @@ def _generate_gold_hole_pattern(
     radius_um = hole_diameter_um / 2.0
 
     if pitch_um <= 0.0:
-        raise ValueError("Computed pitch (hole_diameter_um + hole_edge_to_edge_spacing_um) must be positive.")
+        raise ValueError(
+            "Computed pitch (hole_diameter_um + hole_edge_to_edge_spacing_um) "
+            "must be positive."
+        )
 
     hole_intensity_factor = float(hole_intensity_factor)
     gold_intensity_factor = float(gold_intensity_factor)
     if hole_intensity_factor <= 0.0 or gold_intensity_factor <= 0.0:
-        raise ValueError("hole_intensity_factor and gold_intensity_factor must be positive.")
+        raise ValueError(
+            "hole_intensity_factor and gold_intensity_factor must be positive."
+        )
 
     # Convert pixel size to micrometers for coordinate generation.
     pixel_size_um = pixel_size_nm * 1e-3
@@ -110,6 +118,140 @@ def _generate_gold_hole_pattern(
         pattern /= mean_val
 
     return pattern
+
+
+def _resolve_gold_hole_parameters(params: dict) -> dict:
+    """
+    Resolve geometry and optical-intensity parameters for the gold film with
+    circular holes from the global PARAMS dictionary.
+
+    This helper is the single source of truth for:
+        - hole_diameter_um
+        - hole_edge_to_edge_spacing_um
+        - hole_depth_nm
+        - hole_intensity_factor
+        - gold_intensity_factor
+        - pitch_um
+        - radius_um
+
+    Both "default_gold_holes" and "lab_default_gold_holes" currently share the
+    same default values when fields are omitted, matching the existing code
+    behavior. Differences between these presets can be introduced here later
+    without touching the calling sites.
+    """
+    dims = params.get("chip_pattern_dimensions", {})
+    if not isinstance(dims, dict):
+        raise TypeError(
+            "PARAMS['chip_pattern_dimensions'] must be a dictionary when "
+            "using chip_pattern_model 'gold_holes_v1'."
+        )
+
+    # Substrate preset is kept for potential future specialization of defaults.
+    substrate_preset_raw = params.get("chip_substrate_preset", "empty_background")
+    substrate_preset = str(substrate_preset_raw).strip().lower()
+
+    # Geometry defaults (identical to previous implementation).
+    hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
+    hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
+    hole_depth_nm = float(dims.get("hole_depth_nm", 20.0))  # bookkeeping only
+
+    if hole_diameter_um <= 0.0:
+        raise ValueError(
+            "chip_pattern_dimensions['hole_diameter_um'] must be positive."
+        )
+    if hole_edge_to_edge_spacing_um < 0.0:
+        raise ValueError(
+            "chip_pattern_dimensions['hole_edge_to_edge_spacing_um'] must be "
+            "non-negative."
+        )
+
+    pitch_um = hole_diameter_um + hole_edge_to_edge_spacing_um
+    if pitch_um <= 0.0:
+        raise ValueError(
+            "Computed pitch (hole_diameter_um + hole_edge_to_edge_spacing_um) "
+            "must be positive."
+        )
+
+    radius_um = hole_diameter_um / 2.0
+
+    # Optical intensity parameters (identical defaults to previous code).
+    hole_intensity_factor = float(dims.get("hole_intensity_factor", 0.7))
+    gold_intensity_factor = float(dims.get("gold_intensity_factor", 1.0))
+
+    if hole_intensity_factor <= 0.0 or gold_intensity_factor <= 0.0:
+        raise ValueError(
+            "chip_pattern_dimensions['hole_intensity_factor'] and "
+            "'gold_intensity_factor' must be positive."
+        )
+
+    return {
+        "hole_diameter_um": hole_diameter_um,
+        "hole_edge_to_edge_spacing_um": hole_edge_to_edge_spacing_um,
+        "hole_depth_nm": hole_depth_nm,
+        "hole_intensity_factor": hole_intensity_factor,
+        "gold_intensity_factor": gold_intensity_factor,
+        "pitch_um": pitch_um,
+        "radius_um": radius_um,
+        "substrate_preset": substrate_preset,
+    }
+
+
+def _map_position_nm_to_gold_hole_unit_cell(
+    params: dict,
+    x_nm: float,
+    y_nm: float,
+    pitch_um: float,
+) -> tuple:
+    """
+    Map a lateral position (x_nm, y_nm) from the simulation's FOV coordinates
+    into the canonical unit cell of the gold-hole lattice.
+
+    The mapping is consistent with _generate_gold_hole_pattern and the
+    Brownian-exclusion logic:
+
+        - The field of view is a square of side length
+              img_size_nm = image_size_pixels * pixel_size_nm
+          centered at (0, 0) in physical coordinates.
+
+        - The input positions (x_nm, y_nm) are interpreted as distances from
+          the FOV corner (0, 0). We convert them to centered coordinates,
+          then to micrometers, and finally wrap them into the interval
+          [-pitch_um/2, pitch_um/2) in each dimension.
+
+    Returns:
+        dx_um, dy_um, r_um, x_um, y_um, img_size_nm
+        where:
+            (dx_um, dy_um) are coordinates inside the canonical unit cell,
+            r_um = sqrt(dx_um**2 + dy_um**2),
+            (x_um, y_um) are the centered coordinates in micrometers, and
+            img_size_nm is the full FOV extent in nanometers.
+    """
+    img_size_pixels = int(params["image_size_pixels"])
+    pixel_size_nm = float(params["pixel_size_nm"])
+    if img_size_pixels <= 0 or pixel_size_nm <= 0.0:
+        raise ValueError(
+            "PARAMS['image_size_pixels'] and PARAMS['pixel_size_nm'] must be "
+            "positive when substrate exclusion is active."
+        )
+
+    img_size_nm = img_size_pixels * pixel_size_nm
+
+    # Centered coordinates in nm.
+    x_nm_centered = float(x_nm) - img_size_nm / 2.0
+    y_nm_centered = float(y_nm) - img_size_nm / 2.0
+
+    # Convert to micrometers.
+    x_um = x_nm_centered * 1e-3
+    y_um = y_nm_centered * 1e-3
+
+    # Map into the unit cell using the same periodic wrapping as in
+    # _generate_gold_hole_pattern.
+    half_pitch = pitch_um / 2.0
+    dx_um = (x_um + half_pitch) % pitch_um - half_pitch
+    dy_um = (y_um + half_pitch) % pitch_um - half_pitch
+    r_um = math.hypot(dx_um, dy_um)
+
+    return dx_um, dy_um, r_um, x_um, y_um, img_size_nm
 
 
 def is_position_in_chip_solid(params: dict, x_nm: float, y_nm: float) -> bool:
@@ -179,70 +321,16 @@ def is_position_in_chip_solid(params: dict, x_nm: float, y_nm: float) -> bool:
         # they should be added explicitly here.
         return False
 
-    # Geometry parameters for the gold film with circular holes. For the lab
-    # default preset we apply canonical values when the user has not overridden
-    # them; for the generic default preset we use the values exactly as given
-    # (with the same fallbacks).
-    dims = params.get("chip_pattern_dimensions", {})
-    if not isinstance(dims, dict):
-        raise TypeError(
-            "PARAMS['chip_pattern_dimensions'] must be a dictionary when "
-            "substrate exclusion is used with 'gold_holes_v1'."
-        )
+    # Resolve geometry for the gold-hole lattice.
+    geom = _resolve_gold_hole_parameters(params)
+    radius_um = geom["radius_um"]
+    pitch_um = geom["pitch_um"]
 
-    if substrate_preset == "lab_default_gold_holes":
-        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
-        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
-    else:  # "default_gold_holes"
-        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
-        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
-
-    if hole_diameter_um <= 0.0:
-        raise ValueError(
-            "chip_pattern_dimensions['hole_diameter_um'] must be positive "
-            "when substrate exclusion is active."
-        )
-    if hole_edge_to_edge_spacing_um < 0.0:
-        raise ValueError(
-            "chip_pattern_dimensions['hole_edge_to_edge_spacing_um'] must be "
-            "non-negative when substrate exclusion is active."
-        )
-
-    pitch_um = hole_diameter_um + hole_edge_to_edge_spacing_um
-    if pitch_um <= 0.0:
-        raise ValueError(
-            "Computed pitch (hole_diameter_um + hole_edge_to_edge_spacing_um) "
-            "must be positive when substrate exclusion is active."
-        )
-
-    radius_um = hole_diameter_um / 2.0
-
-    # Field-of-view geometry in nanometers. We convert to a centered coordinate
-    # system that matches the pattern generation convention: the origin is at
-    # the center of the field of view.
-    img_size_pixels = int(params["image_size_pixels"])
-    pixel_size_nm = float(params["pixel_size_nm"])
-    if img_size_pixels <= 0 or pixel_size_nm <= 0.0:
-        raise ValueError(
-            "PARAMS['image_size_pixels'] and PARAMS['pixel_size_nm'] must be "
-            "positive when substrate exclusion is active."
-        )
-
-    img_size_nm = img_size_pixels * pixel_size_nm
-
-    x_nm_centered = float(x_nm) - img_size_nm / 2.0
-    y_nm_centered = float(y_nm) - img_size_nm / 2.0
-
-    x_um = x_nm_centered * 1e-3
-    y_um = y_nm_centered * 1e-3
-
-    # Map the position into the canonical unit cell of the hole lattice using
-    # the same periodic wrapping as in _generate_gold_hole_pattern.
-    half_pitch = pitch_um / 2.0
-    dx_um = (x_um + half_pitch) % pitch_um - half_pitch
-    dy_um = (y_um + half_pitch) % pitch_um - half_pitch
-
-    r_um = math.hypot(dx_um, dy_um)
+    # Map the position into the canonical unit cell and test whether it falls
+    # inside a hole or in the gold film.
+    _, _, r_um, _, _, _ = _map_position_nm_to_gold_hole_unit_cell(
+        params, x_nm, y_nm, pitch_um
+    )
 
     inside_hole = (r_um <= radius_um)
 
@@ -300,57 +388,15 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
         # Unsupported configuration for projection logic; leave position as-is.
         return float(x_nm), float(y_nm)
 
-    # Geometry parameters (same as in is_position_in_chip_solid).
-    dims = params.get("chip_pattern_dimensions", {})
-    if not isinstance(dims, dict):
-        raise TypeError(
-            "PARAMS['chip_pattern_dimensions'] must be a dictionary when "
-            "substrate exclusion is used with 'gold_holes_v1'."
-        )
+    # Geometry parameters (same source as in is_position_in_chip_solid).
+    geom = _resolve_gold_hole_parameters(params)
+    radius_um = geom["radius_um"]
+    pitch_um = geom["pitch_um"]
 
-    if substrate_preset == "lab_default_gold_holes":
-        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
-        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
-    else:
-        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
-        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
-
-    if hole_diameter_um <= 0.0:
-        raise ValueError(
-            "chip_pattern_dimensions['hole_diameter_um'] must be positive "
-            "when substrate exclusion is active."
-        )
-    if hole_edge_to_edge_spacing_um < 0.0:
-        raise ValueError(
-            "chip_pattern_dimensions['hole_edge_to_edge_spacing_um'] must be "
-            "non-negative when substrate exclusion is active."
-        )
-
-    pitch_um = hole_diameter_um + hole_edge_to_edge_spacing_um
-    radius_um = hole_diameter_um / 2.0
-
-    img_size_pixels = int(params["image_size_pixels"])
-    pixel_size_nm = float(params["pixel_size_nm"])
-    if img_size_pixels <= 0 or pixel_size_nm <= 0.0:
-        raise ValueError(
-            "PARAMS['image_size_pixels'] and PARAMS['pixel_size_nm'] must be "
-            "positive when substrate exclusion is active."
-        )
-
-    img_size_nm = img_size_pixels * pixel_size_nm
-
-    # Centered coordinates in nm and um.
-    x_nm_centered = float(x_nm) - img_size_nm / 2.0
-    y_nm_centered = float(y_nm) - img_size_nm / 2.0
-
-    x_um = x_nm_centered * 1e-3
-    y_um = y_nm_centered * 1e-3
-
-    # Map into unit cell.
-    half_pitch = pitch_um / 2.0
-    dx_um = (x_um + half_pitch) % pitch_um - half_pitch
-    dy_um = (y_um + half_pitch) % pitch_um - half_pitch
-    r_um = math.hypot(dx_um, dy_um)
+    # Map position into the unit cell and obtain centered coordinates.
+    dx_um, dy_um, r_um, x_um, y_um, img_size_nm = _map_position_nm_to_gold_hole_unit_cell(
+        params, x_nm, y_nm, pitch_um
+    )
 
     # If for some reason we are already in the hole (should not happen here),
     # leave unchanged.
@@ -470,45 +516,13 @@ def generate_reference_and_background_maps(
             "'empty_background', 'default_gold_holes', and 'lab_default_gold_holes'."
         )
 
-    dims = params.get("chip_pattern_dimensions", {})
-    if not isinstance(dims, dict):
-        raise TypeError(
-            "PARAMS['chip_pattern_dimensions'] must be a dictionary when "
-            "chip_pattern_model is 'gold_holes_v1'."
-        )
-
-    # Geometry parameters. For the lab default preset we apply canonical values
-    # (15 µm holes, 2 µm spacing, 20 nm metal thickness) when the user has not
-    # overridden them. For the generic default_gold_holes preset, the values in
-    # chip_pattern_dimensions are used as-is with reasonable fallbacks.
-    if substrate_preset == "lab_default_gold_holes":
-        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
-        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
-        hole_depth_nm = float(dims.get("hole_depth_nm", 20.0))  # currently unused in optics
-    else:  # "default_gold_holes"
-        hole_diameter_um = float(dims.get("hole_diameter_um", 15.0))
-        hole_edge_to_edge_spacing_um = float(dims.get("hole_edge_to_edge_spacing_um", 2.0))
-        hole_depth_nm = float(dims.get("hole_depth_nm", 20.0))  # currently unused in optics
-
-    # Relative intensity levels for holes and gold regions. These control the
-    # spatial modulation of both the reference field and the background
-    # intensity. The pattern is normalized to unit mean afterwards to keep the
-    # global brightness consistent with background_intensity.
-    hole_intensity_factor = float(dims.get("hole_intensity_factor", 0.7))
-    gold_intensity_factor = float(dims.get("gold_intensity_factor", 1.0))
-
-    # Validate geometry and intensity factors.
-    if hole_diameter_um <= 0.0:
-        raise ValueError("chip_pattern_dimensions['hole_diameter_um'] must be positive.")
-    if hole_edge_to_edge_spacing_um < 0.0:
-        raise ValueError(
-            "chip_pattern_dimensions['hole_edge_to_edge_spacing_um'] must be non-negative."
-        )
-    if hole_intensity_factor <= 0.0 or gold_intensity_factor <= 0.0:
-        raise ValueError(
-            "chip_pattern_dimensions['hole_intensity_factor'] and "
-            "'gold_intensity_factor' must be positive."
-        )
+    # Resolve geometry and intensity parameters from PARAMS in a single place.
+    geom = _resolve_gold_hole_parameters(params)
+    hole_diameter_um = geom["hole_diameter_um"]
+    hole_edge_to_edge_spacing_um = geom["hole_edge_to_edge_spacing_um"]
+    hole_depth_nm = geom["hole_depth_nm"]  # currently unused in optics
+    hole_intensity_factor = geom["hole_intensity_factor"]
+    gold_intensity_factor = geom["gold_intensity_factor"]
 
     pixel_size_nm = float(params["pixel_size_nm"])
     if pixel_size_nm <= 0.0:
