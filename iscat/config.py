@@ -18,6 +18,18 @@ PARAMS = {
     # total number of frames: num_frames = fps * duration_seconds.
     "fps": 24,
 
+    # Exposure time for a single frame in milliseconds. This controls the
+    # temporal window over which motion blur is simulated when
+    # motion_blur_enabled is True. Must satisfy:
+    #
+    #     0 < exposure_time_ms <= 1000 / fps
+    #
+    # so that the exposure window lies entirely within a single frame
+    # interval. The default value below (~41.67 ms for 24 fps) corresponds
+    # to a full-frame exposure and reproduces the previous behavior where
+    # the particle motion was averaged over the entire frame interval.
+    "exposure_time_ms": 1000.0 / 24.0,
+
     # Total duration of the simulated video in seconds.
     # Positive float or int. Combined with fps determines num_frames.
     "duration_seconds": 1,
@@ -159,7 +171,7 @@ PARAMS = {
     # Model controlling the Z-axis Brownian motion (and, in future, interactions
     # with surfaces or substrates).
     #
-    "z_motion_constraint_model": "surface_interaction_v2",
+    "z_motion_constraint_model": "surface_interaction_v1",
 
     # --- iPSF & SCATTERING CALCULATION ---
     # Oversampling factor for the internal PSF/canvas resolution.
@@ -260,7 +272,8 @@ PARAMS = {
     # --- MOTION BLUR ---
     # Toggle for motion blur simulation.
     #   True  -> each frame is computed as the average of motion_blur_subsamples
-    #            sub-steps, using interpolated particle positions.
+    #            sub-steps, using interpolated particle positions over the
+    #            exposure window defined by exposure_time_ms.
     #   False -> a single position per frame (no simulated motion blur).
     "motion_blur_enabled": True,
 

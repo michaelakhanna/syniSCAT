@@ -145,10 +145,44 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
     pattern is reconstructed from these base maps and modulated per-frame using
     `compute_contrast_scale_for_frame`. When the contrast model is "static",
     the behavior is identical to the original implementation.
+
+    The temporal sampling used for motion blur within each frame is controlled
+    by PARAMS["exposure_time_ms"]. For a given frame at index f:
+        - The frame interval is 1 / fps.
+        - The exposure window is a contiguous interval of length
+          exposure_time_ms (converted to seconds) centered on the frame's
+          midpoint time.
+        - Particle positions for motion blur are sampled uniformly over this
+          exposure window and interpolated between the stored trajectory
+          positions at integer frame times.
     """
-    num_frames = int(params["fps"] * params["duration_seconds"])
-    dt = 1.0 / params["fps"]
-    num_particles = params["num_particles"]
+    # --- Basic timing parameters ---
+    fps = float(params["fps"])
+    duration_seconds = float(params["duration_seconds"])
+    num_frames = int(fps * duration_seconds)
+    if num_frames <= 0:
+        raise ValueError(
+            "The product PARAMS['fps'] * PARAMS['duration_seconds'] must be "
+            "positive to generate at least one frame."
+        )
+
+    frame_interval_s = 1.0 / fps
+
+    # Exposure time in seconds for motion blur integration. If the parameter is
+    # omitted, assume a full-frame exposure so that behavior matches the
+    # original implementation.
+    exposure_time_ms = float(params.get("exposure_time_ms", 1000.0 * frame_interval_s))
+    exposure_time_s = exposure_time_ms / 1000.0
+
+    if exposure_time_s <= 0.0:
+        raise ValueError("PARAMS['exposure_time_ms'] must be positive.")
+    if exposure_time_s > frame_interval_s + 1e-12:
+        raise ValueError(
+            "PARAMS['exposure_time_ms'] must satisfy exposure_time_ms <= 1000 / fps "
+            "so that the exposure window is contained within a single frame interval."
+        )
+
+    num_particles = int(params["num_particles"])
 
     img_size = params["image_size_pixels"]
     pixel_size_nm = params["pixel_size_nm"]
@@ -236,7 +270,11 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
     max_camera_count = (1 << bit_depth) - 1
 
     num_subsamples = params["motion_blur_subsamples"] if params["motion_blur_enabled"] else 1
-    sub_dt = dt / num_subsamples
+    if not isinstance(num_subsamples, int) or num_subsamples <= 0:
+        raise ValueError(
+            "PARAMS['motion_blur_subsamples'] must be a positive integer."
+        )
+    sub_dt = exposure_time_s / num_subsamples
 
     all_signal_frames = []
     all_reference_frames = []
@@ -301,10 +339,28 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
 
         # --- Subsample rendering for motion blur ---
         for s in range(num_subsamples):
-            current_time = f * dt + s * sub_dt
-            frame_idx_floor = int(current_time / dt)
-            frame_idx_ceil = min(frame_idx_floor + 1, num_frames - 1)
-            interp_factor = (current_time / dt) - frame_idx_floor
+            # Sample particle positions uniformly over the exposure window
+            # centered on the frame midpoint time.
+            frame_center_time = (f + 0.5) * frame_interval_s
+            start_time = frame_center_time - 0.5 * exposure_time_s
+            current_time = start_time + (s + 0.5) * sub_dt
+
+            # Convert the continuous time to indices in the discrete trajectory
+            # array, which is sampled at the frame interval.
+            normalized_time = current_time / frame_interval_s
+            frame_idx_floor = int(np.floor(normalized_time))
+            if frame_idx_floor < 0:
+                frame_idx_floor = 0
+
+            if frame_idx_floor >= num_frames - 1:
+                # Use the last available trajectory sample when we are at or
+                # beyond the final stored time.
+                frame_idx_floor = num_frames - 1
+                frame_idx_ceil = num_frames - 1
+                interp_factor = 0.0
+            else:
+                frame_idx_ceil = frame_idx_floor + 1
+                interp_factor = normalized_time - frame_idx_floor
 
             # Linearly interpolate particle positions between trajectory points.
             current_pos_nm = (
