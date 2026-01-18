@@ -21,12 +21,17 @@ def compute_contrast_frames(signal_frames, reference_frames, params):
                 Contrast = (Signal - Reference) / (Reference + eps)
             using the corresponding noisy reference frame.
 
-        - "video_mean":
+        - "video_median":
             Estimate a static background frame from the entire video and
             subtract this background from each signal frame. The background is
             the per-pixel temporal median of all raw signal frames:
                 B(x, y) = median_t Signal_t(x, y)
                 Contrast_t(x, y) = Signal_t(x, y) - B(x, y)
+
+          For backward compatibility with older configurations, the legacy
+          option string "video_mean" is accepted as an exact alias for
+          "video_median". The implementation always uses the temporal median
+          (never the arithmetic mean).
 
     Edge cases:
         - If signal_frames is empty, returns an empty list.
@@ -71,7 +76,7 @@ def compute_contrast_frames(signal_frames, reference_frames, params):
             subtracted = (signal_f - ref_f) / (ref_f + 1e-9)
             contrast_frames.append(subtracted)
 
-    elif method == "video_mean":
+    elif method in ("video_median", "video_mean"):
         # Robust background subtraction from a single video:
         #   1. Build a per-pixel temporal median background frame:
         #        B(x,y) = median_t Signal_t(x,y)
@@ -81,7 +86,7 @@ def compute_contrast_frames(signal_frames, reference_frames, params):
         # The reference frames are not used in this method.
         print(
             "Applying background subtraction using temporal median of signal "
-            "frames (video_mean method)..."
+            "frames (video_median method)..."
         )
 
         num_frames = len(signal_frames)
@@ -107,7 +112,8 @@ def compute_contrast_frames(signal_frames, reference_frames, params):
     else:
         raise ValueError(
             f"Unknown background_subtraction_method: {method}. "
-            "Supported values are 'reference_frame' and 'video_mean'."
+            "Supported values are 'reference_frame' and 'video_median' "
+            "(with 'video_mean' accepted as a deprecated alias)."
         )
 
     return contrast_frames
@@ -176,7 +182,9 @@ def apply_background_subtraction(signal_frames, reference_frames, params):
 
         1. compute_contrast_frames(...):
                Computes floating-point contrast frames according to the selected
-               background subtraction method ("reference_frame" or "video_mean").
+               background subtraction method ("reference_frame" or
+               "video_median"; the legacy string "video_mean" is accepted as an
+               alias for "video_median" and uses the temporal median).
         2. normalize_contrast_frames(...):
                Applies percentile-based intensity windowing (0.5 and 99.5
                percentiles) and maps the contrast frames into 8-bit [0, 255].

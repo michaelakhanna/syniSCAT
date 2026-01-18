@@ -266,12 +266,15 @@ PARAMS = {
     #           Contrast = (Signal - Reference) / (Reference + eps)
     #       using the corresponding noisy reference frame.
     #
-    #   "video_mean" (name kept for backward compatibility) ->
+    #   "video_median" ->
     #       Compute a static background B(x, y) as the per-pixel temporal
     #       median of all raw signal frames, then for each frame compute:
     #           Contrast = Signal - B
     #       This robustly removes a static background without burned-in
     #       negative trails from moving particles.
+    #
+    # For backward compatibility with older configurations, the legacy option
+    # string "video_mean" is accepted as an exact alias for "video_median".
     "background_subtraction_method": "reference_frame",
 
     # --- MOTION BLUR ---
