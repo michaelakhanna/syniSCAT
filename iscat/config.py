@@ -240,7 +240,7 @@ PARAMS = {
     #   True  -> simulate shot noise based on the local intensity and
     #            shot_noise_scaling_factor.
     #   False -> no Poisson noise.
-    "shot_noise_enabled": True,
+    "shot_noise_enabled": False,
 
     # Scaling factor for the strength of Poisson (shot) noise.
     # Non-negative float:
@@ -253,7 +253,7 @@ PARAMS = {
     #   True  -> add zero-mean Gaussian noise with standard deviation
     #            read_noise_std (in camera counts).
     #   False -> no Gaussian read noise.
-    "gaussian_noise_enabled": True,
+    "gaussian_noise_enabled": False,
 
     # Standard deviation of Gaussian readout noise in camera counts.
     # Non-negative float; only used when gaussian_noise_enabled is True.
