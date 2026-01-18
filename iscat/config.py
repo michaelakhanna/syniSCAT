@@ -74,7 +74,7 @@ PARAMS = {
     # particle to continue receiving masks when trackability is enabled.
     # If the confidence for a particle falls below this threshold, that
     # particle is marked "lost" and no further masks are generated for it.
-    "trackability_confidence_threshold": 0.8,
+    "trackability_confidence_threshold": 0.7,
 
     # Master switch for the Human Trackability Confidence Model.
     #   True  -> the TrackabilityModel is used to decide whether to generate
@@ -83,7 +83,7 @@ PARAMS = {
     #   False -> masks (if enabled) are generated for all particles in every
     #            frame without gating, and the video always runs for the full
     #            duration.
-    "trackability_enabled": False,
+    "trackability_enabled": True,
 
     # --- OPTICAL SETUP ---
     # Illumination wavelength in vacuum, in nanometers.

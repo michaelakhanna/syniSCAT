@@ -1,3 +1,4 @@
+# File: rendering.py
 import numpy as np
 import cv2
 from tqdm import tqdm
@@ -292,6 +293,12 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
     E_ref_amplitude = float(params["reference_field_amplitude"])
     background_intensity = float(params["background_intensity"])
 
+    if E_ref_amplitude <= 0.0:
+        raise ValueError(
+            "PARAMS['reference_field_amplitude'] must be positive. "
+            "A nonzero reference field is required for interferometric contrast."
+        )
+
     # For time-dependent contrast, reconstruct the dimensionless base pattern
     # maps so that a per-frame contrast scale can be applied without changing
     # the underlying geometry.
@@ -496,15 +503,27 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
                     crop_start:crop_end, crop_start:crop_end
                 ]
 
+                # Raw optical contrast (intensity difference relative to E_ref_intensity_os).
                 contrast_os = (
                     np.abs(E_ref_os + E_sca_particle_blurred_fov) ** 2
                     - E_ref_intensity_os
                 )
-                # Keep your original intensity downsampling behavior (cv2.INTER_AREA)
-                # so the overall look remains close to your previous videos.
+                # Downsample to the final image resolution using the same behavior
+                # as the main intensity path (cv2.INTER_AREA).
                 contrast_final = cv2.resize(
                     contrast_os, final_size, interpolation=cv2.INTER_AREA
                 )
+
+                # Normalize contrast into units consistent with the trackability
+                # noise model. The TrackabilityModel expects contrast approximately
+                # in units of (I - B) / background_intensity; using
+                #
+                #   contrast_norm = contrast_final / E_ref_amplitude**2
+                #
+                # yields values proportional to that quantity (up to spatial
+                # pattern factors with unit mean), and masks remain unchanged
+                # because they normalize by the maximum magnitude internally.
+                contrast_final_normalized = contrast_final / (E_ref_amplitude ** 2)
 
                 if trackability_enabled:
                     position_nm = trajectories[i, f, :]
@@ -512,12 +531,12 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
                         particle_index=i,
                         frame_index=f,
                         position_nm=position_nm,
-                        contrast_image=contrast_final,
+                        contrast_image=contrast_final_normalized,
                     )
 
                     if confidence >= trackability_threshold:
                         generate_and_save_mask_for_particle(
-                            contrast_image=contrast_final,
+                            contrast_image=contrast_final_normalized,
                             params=params,
                             particle_index=i,
                             frame_index=f,
@@ -526,7 +545,7 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
                         trackability_model.lost[i] = True
                 else:
                     generate_and_save_mask_for_particle(
-                        contrast_image=contrast_final,
+                        contrast_image=contrast_final_normalized,
                         params=params,
                         particle_index=i,
                         frame_index=f,
