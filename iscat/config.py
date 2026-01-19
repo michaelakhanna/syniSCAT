@@ -190,10 +190,19 @@ PARAMS = {
     "pupil_samples": 512,
 
     # Total axial (z) range, in nanometers, over which the iPSF stack is
-    # precomputed. The stack is centered around z = 0 and spans
-    # [-z_stack_range_nm/2, +z_stack_range_nm/2].
-    # Must be positive.
+    # precomputed. Historically this was set manually. In the current pipeline
+    # this value is treated as a *fallback* / initial guess: run_simulation
+    # overwrites it at runtime with an automatically estimated value based on
+    # Brownian diffusion statistics and z_stack_coverage_probability.
     "z_stack_range_nm": 30500,
+
+    # Target probability (in [0, 1]) that a particle's true z-position remains
+    # within the precomputed iPSF z-stack for the entire video. Higher values
+    # yield larger z-stacks (more compute but a lower chance that the particle
+    # diffuses outside the modeled axial range). The estimator uses the most
+    # mobile particle (largest diffusion coefficient) and a conservative union
+    # bound over all frames to choose a single global z_stack_range_nm.
+    "z_stack_coverage_probability": 0.99,
 
     # Step size between consecutive axial positions in the iPSF stack, in nm.
     # Positive float. Smaller values increase axial resolution and cost.
@@ -240,7 +249,7 @@ PARAMS = {
     #   True  -> simulate shot noise based on the local intensity and
     #            shot_noise_scaling_factor.
     #   False -> no Poisson noise.
-    "shot_noise_enabled": False,
+    "shot_noise_enabled": True,
 
     # Scaling factor for the strength of Poisson (shot) noise.
     # Non-negative float:
@@ -253,7 +262,7 @@ PARAMS = {
     #   True  -> add zero-mean Gaussian noise with standard deviation
     #            read_noise_std (in camera counts).
     #   False -> no Gaussian read noise.
-    "gaussian_noise_enabled": False,
+    "gaussian_noise_enabled": True,
 
     # Standard deviation of Gaussian readout noise in camera counts.
     # Non-negative float; only used when gaussian_noise_enabled is True.
