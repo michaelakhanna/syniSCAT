@@ -202,7 +202,7 @@ PARAMS = {
     # diffuses outside the modeled axial range). The estimator uses the most
     # mobile particle (largest diffusion coefficient) and a conservative union
     # bound over all frames to choose a single global z_stack_range_nm.
-    "z_stack_coverage_probability": 0.99,
+    "z_stack_coverage_probability": 0.999,
 
     # Step size between consecutive axial positions in the iPSF stack, in nm.
     # Positive float. Smaller values increase axial resolution and cost.
