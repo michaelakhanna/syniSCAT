@@ -1,3 +1,4 @@
+# File: chip_pattern.py
 import math
 import numpy as np
 
@@ -294,8 +295,6 @@ def is_position_in_chip_solid(params: dict, x_nm: float, y_nm: float) -> bool:
         substrate (e.g., gold film), False otherwise.
     """
     chip_enabled = bool(params.get("chip_pattern_enabled", False))
-    if not chip_enabled:
-        return False
 
     pattern_model_raw = params.get("chip_pattern_model", "none")
     pattern_model = str(pattern_model_raw).strip().lower()
@@ -305,7 +304,7 @@ def is_position_in_chip_solid(params: dict, x_nm: float, y_nm: float) -> bool:
 
     # No solid structure when the background is empty or the pattern model is
     # explicitly disabled.
-    if substrate_preset == "empty_background" or pattern_model == "none":
+    if not chip_enabled or substrate_preset == "empty_background" or pattern_model == "none":
         return False
 
     # Only gold-holes substrates are modeled as solid regions at this stage.
@@ -478,8 +477,14 @@ def generate_reference_and_background_maps(
     background_intensity = float(params["background_intensity"])
 
     chip_enabled = bool(params.get("chip_pattern_enabled", False))
-    pattern_model = str(params.get("chip_pattern_model", "gold_holes_v1"))
-    substrate_preset = str(params.get("chip_substrate_preset", "empty_background"))
+
+    pattern_model_raw = params.get("chip_pattern_model", "gold_holes_v1")
+    substrate_preset_raw = params.get("chip_substrate_preset", "empty_background")
+
+    # Normalize to lowercase/stripped so behavior is consistent with the
+    # trajectory-side functions (is_position_in_chip_solid, etc.).
+    pattern_model = str(pattern_model_raw).strip().lower()
+    substrate_preset = str(substrate_preset_raw).strip().lower()
 
     # Default: no spatial pattern, uniform maps (matches original behavior).
     use_uniform_background = (
@@ -502,7 +507,7 @@ def generate_reference_and_background_maps(
     # appropriate pattern maps.
     if pattern_model != "gold_holes_v1":
         raise ValueError(
-            f"Unsupported chip_pattern_model '{pattern_model}'. "
+            f"Unsupported chip_pattern_model '{pattern_model_raw}'. "
             "Currently supported: 'none', 'gold_holes_v1'."
         )
 
@@ -511,7 +516,7 @@ def generate_reference_and_background_maps(
     # interface of this function.
     if substrate_preset not in ("default_gold_holes", "lab_default_gold_holes"):
         raise ValueError(
-            f"Unsupported chip_substrate_preset '{substrate_preset}' for "
+            f"Unsupported chip_substrate_preset '{substrate_preset_raw}' for "
             "chip_pattern_model 'gold_holes_v1'. Supported presets are "
             "'empty_background', 'default_gold_holes', and 'lab_default_gold_holes'."
         )
