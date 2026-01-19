@@ -1,3 +1,4 @@
+# File: presets.py
 from copy import deepcopy
 from typing import Any, Callable, Dict, Iterable, Optional
 
@@ -22,7 +23,7 @@ Document (CDD Section 5.1) at two levels:
         particles near a surface). Experiment presets may build on an
         instrument preset and can include randomized parameter choices in
         physically meaningful ranges (e.g., exposure time, particle
-        materials).
+        materials, particle sizes).
 
 High-level dataset-generation wrappers (CDD Section 5.2), which repeatedly
 sample parameter sets to generate large training datasets, are intended to
@@ -210,9 +211,13 @@ def _build_nanoplastic_surface_experiment(
               ["PET", "Polyethylene", "Polypropylene"]
           and clears explicit particle_refractive_indices so that material-based
           lookup is used.
+        - Randomizes particle_diameters_nm for each particle within a
+          physically plausible nanoplastic size range so that both diffusion
+          and scattering vary across videos.
 
     All other parameters (e.g., chip pattern, number of particles, particle
-    diameters) are inherited from base_params and the instrument preset.
+    signal multipliers) are inherited from base_params and the instrument preset
+    unless explicitly overridden here.
 
     Args:
         base_params (Dict[str, Any]):
@@ -256,14 +261,15 @@ def _build_nanoplastic_surface_experiment(
     exposure_ms = float(rng.uniform(min_exposure_ms, max_exposure_ms))
     params["exposure_time_ms"] = exposure_ms
 
-    # 4. Randomize particle materials per particle from common nanoplastic
-    #    dielectrics / biological-like materials.
+    # 4. Determine number of particles for this experiment.
     num_particles = int(params.get("num_particles", 1))
     if num_particles <= 0:
         raise ValueError(
             "PARAMS['num_particles'] must be positive for the nanoplastic_surface experiment."
         )
 
+    # 5. Randomize particle materials per particle from common nanoplastic
+    #    dielectrics / biological-like materials.
     candidate_materials = ("PET", "Polyethylene", "Polypropylene")
 
     # Draw one material label for each particle.
@@ -274,6 +280,24 @@ def _build_nanoplastic_surface_experiment(
     # Ensure explicit refractive indices are cleared so that material-based
     # lookup is used for all particles.
     params["particle_refractive_indices"] = [None] * num_particles
+
+    # 6. Randomize particle diameters within a plausible nanoplastic range.
+    #
+    # This range (40–150 nm) is chosen to:
+    #   - Stay well within the assumptions of the current optical and
+    #     Brownian-motion models.
+    #   - Provide meaningful variability in both diffusion speed and iSCAT
+    #     scattering amplitude across different videos and particles.
+    min_diameter_nm = 40.0
+    max_diameter_nm = 150.0
+    if max_diameter_nm < min_diameter_nm:
+        raise ValueError(
+            "Internal error in nanoplastic_surface diameter range: "
+            "max_diameter_nm must be >= min_diameter_nm."
+        )
+
+    diameters = rng.uniform(min_diameter_nm, max_diameter_nm, size=num_particles)
+    params["particle_diameters_nm"] = [float(d) for d in diameters]
 
     return params
 
@@ -314,7 +338,7 @@ def apply_experiment_preset(
     An experiment preset may:
         - Apply a specific instrument preset (e.g., '100x_custom').
         - Override or randomize additional parameters (e.g., exposure time,
-          particle materials, z-motion model).
+          particle materials, particle sizes, z-motion model).
 
     This function does not modify the input dictionary in-place. Instead, it
     passes `base_params` into the experiment builder, which is responsible for
