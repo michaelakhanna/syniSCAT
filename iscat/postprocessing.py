@@ -1,3 +1,4 @@
+# File: postprocessing.py
 import numpy as np
 import cv2
 from tqdm import tqdm
@@ -137,6 +138,52 @@ def compute_contrast_frames(signal_frames, reference_frames, params):
     return contrast_frames
 
 
+def compute_normalization_range(contrast_frames):
+    """
+    Compute the global lower and upper bounds used to map contrast frames to
+    an 8-bit [0, 255] range.
+
+    This function centralizes the normalization-range calculation so that
+    alternative high-performance algorithms (CDD Section 6.3) can be
+    introduced here without changing the rest of the post-processing
+    pipeline.
+
+    Current behavior:
+        - Uses percentile-based windowing as described in CDD Section 3.5.
+        - Computes the 0.5 and 99.5 percentile values over the entire set of
+          contrast frames:
+              min_val = P_0.5(contrast_frames)
+              max_val = P_99.5(contrast_frames)
+
+        - These values are returned as floats and are used unchanged by
+          normalize_contrast_frames to map contrast frames into [0, 255].
+
+    This implementation is mathematically identical to the previous inline
+    use of np.percentile in normalize_contrast_frames; only the structure
+    has been refactored.
+
+    Args:
+        contrast_frames (list of np.ndarray): List of floating-point contrast
+            frames. Must be non-empty.
+
+    Returns:
+        tuple[float, float]: (min_val, max_val) percentile values.
+
+    Raises:
+        ValueError: If contrast_frames is empty.
+    """
+    if not contrast_frames:
+        raise ValueError(
+            "contrast_frames must be non-empty when computing a normalization range."
+        )
+
+    # Normalize the contrast range across the whole video for consistent brightness.
+    # This robustly clips outliers by finding the 0.5 and 99.5 percentile values.
+    min_val, max_val = np.percentile(contrast_frames, [0.5, 99.5])
+
+    return float(min_val), float(max_val)
+
+
 def normalize_contrast_frames(contrast_frames, original_frame_shape):
     """
     Normalize contrast frames to an 8-bit [0, 255] range using global
@@ -155,6 +202,10 @@ def normalize_contrast_frames(contrast_frames, original_frame_shape):
            constant mid-gray frames (value 128) with the same shape as the
            original images.
 
+    The range-determination step is now delegated to compute_normalization_range,
+    which preserves behavior but decouples the choice of algorithm from the
+    normalization pipeline.
+
     Args:
         contrast_frames (list of np.ndarray): List of floating-point contrast
             frames.
@@ -168,9 +219,8 @@ def normalize_contrast_frames(contrast_frames, original_frame_shape):
     if not contrast_frames:
         return []
 
-    # Normalize the contrast range across the whole video for consistent brightness.
-    # This robustly clips outliers by finding the 0.5 and 99.5 percentile values.
-    min_val, max_val = np.percentile(contrast_frames, [0.5, 99.5])
+    # Compute the global normalization bounds using the centralized helper.
+    min_val, max_val = compute_normalization_range(contrast_frames)
 
     final_frames_8bit = []
     if max_val > min_val:
