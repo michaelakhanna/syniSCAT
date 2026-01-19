@@ -193,7 +193,7 @@ PARAMS = {
     # precomputed. The stack is centered around z = 0 and spans
     # [-z_stack_range_nm/2, +z_stack_range_nm/2].
     # Must be positive.
-    "z_stack_range_nm": 30000,
+    "z_stack_range_nm": 30500,
 
     # Step size between consecutive axial positions in the iPSF stack, in nm.
     # Positive float. Smaller values increase axial resolution and cost.

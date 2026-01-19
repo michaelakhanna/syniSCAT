@@ -1,4 +1,3 @@
-# File: postprocessing.py
 import numpy as np
 import cv2
 from tqdm import tqdm
@@ -32,6 +31,13 @@ def compute_contrast_frames(signal_frames, reference_frames, params):
           option string "video_mean" is accepted as an exact alias for
           "video_median". The implementation always uses the temporal median
           (never the arithmetic mean).
+
+    After the method-specific background subtraction, a final centering step
+    is applied: for each contrast frame, its spatial median value is subtracted
+    from all pixels. This removes residual per-frame DC offsets (caused by
+    finite PSF support, numerical effects, or imperfect cancellation) that
+    would otherwise appear as global brightness shifts from frame to frame,
+    while preserving local contrast structure.
 
     Edge cases:
         - If signal_frames is empty, returns an empty list.
@@ -116,6 +122,18 @@ def compute_contrast_frames(signal_frames, reference_frames, params):
             "(with 'video_mean' accepted as a deprecated alias)."
         )
 
+    # --- Per-frame baseline removal to suppress global brightness swings ---
+    # For each contrast frame, subtract its spatial median so that the
+    # background baseline is centered around zero in every frame. This
+    # suppresses small per-frame DC offsets that would otherwise appear as
+    # uniform brightness changes across the whole image.
+    for idx, frame in enumerate(contrast_frames):
+        # Use the median (not the mean) to be robust against the small fraction
+        # of pixels containing strong particle signal.
+        median_val = np.median(frame)
+        if median_val != 0.0:
+            contrast_frames[idx] = frame - median_val
+
     return contrast_frames
 
 
@@ -189,7 +207,8 @@ def apply_background_subtraction(signal_frames, reference_frames, params):
                Applies percentile-based intensity windowing (0.5 and 99.5
                percentiles) and maps the contrast frames into 8-bit [0, 255].
 
-    Behavior (unchanged from the previous implementation):
+    Behavior (unchanged from the previous implementation, apart from the
+    per-frame DC centering applied inside compute_contrast_frames):
 
         - If signal_frames is empty, returns an empty list.
         - For method "reference_frame" with missing reference_frames, returns
