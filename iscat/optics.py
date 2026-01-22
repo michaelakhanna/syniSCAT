@@ -18,13 +18,20 @@ class IPSFZInterpolator:
     specific case of a 1D grid (z) with a full 2D field stored at each grid
     point. It keeps the intended behavior: fast lookup of a 2D iPSF slice at an
     arbitrary z, and zero field outside the precomputed z-range.
+
+    In the current architecture, each particle *type* has its own IPSFZInterpolator
+    instance with a type-specific z_grid that is derived from the realized
+    Brownian trajectories of that type (plus a safety margin). Different types
+    therefore have independent axial coverage tailored to their motion.
     """
 
     def __init__(self, z_values_nm, ipsf_stack_complex):
         """
         Args:
             z_values_nm (array-like): 1D array of z positions (in nm) at which
-                the iPSF has been precomputed.
+                the iPSF has been precomputed. This array can be arbitrary and
+                is no longer required to be symmetric or derived from a global
+                z_stack_range_nm; it is specific to the associated particle type.
             ipsf_stack_complex (np.ndarray): 3D complex array with shape
                 (len(z_values_nm), height, width). The first axis corresponds
                 to the z positions.
@@ -44,7 +51,8 @@ class IPSFZInterpolator:
         self.z_max = float(self.z_values[-1])
 
         if self.z_values.size > 1:
-            # The z grid is constructed with np.arange, so we assume uniform spacing.
+            # The z grid is constructed with np.arange in the calling code, so
+            # we assume uniform spacing.
             self.dz = float(self.z_values[1] - self.z_values[0])
         else:
             # Degenerate case: only a single z-slice; no interpolation possible.
@@ -195,44 +203,62 @@ def mie_S1_S2(m, x, mu):
     return S1, S2
 
 
-def compute_ipsf_stack(params, particle_diameter_nm, particle_refractive_index):
+def compute_ipsf_stack(params, particle_diameter_nm, particle_refractive_index, z_values_nm):
     """
-    Computes a complex 3D vectorial interferometric Point Spread Function (iPSF)
+    Compute a complex 3D vectorial interferometric Point Spread Function (iPSF)
     stack using the Debye-Born integral, calculated via FFT for efficiency, and
-    then enforces **radial symmetry** of each slice by ring-averaging the complex
+    then enforce **radial symmetry** of each slice by ring-averaging the complex
     field with **continuous radial interpolation**.
 
-    Pipeline:
+    Fundamental architectural change:
+        - The z-grid over which the iPSF is computed is now provided explicitly
+          via `z_values_nm` and is specific to the associated particle type.
+          The previous design, which derived z-values from a single global
+          params["z_stack_range_nm"], is no longer used in the production
+          pipeline.
+
+        - Different particle types may therefore have different axial coverage,
+          sized from their own realized Brownian trajectories plus a safety
+          margin. IPSFZInterpolator stores this z-grid internally and returns
+          zero outside this range.
+
+    Pipeline (unchanged in spirit):
         1. Build the pupil function on a 2D k-space grid using:
              - Circular aperture (NA / n_medium).
              - Mie scattering amplitude S2(mu) across the pupil.
              - Apodization, spherical aberration, random aberration.
         2. Compute the 2D complex Amplitude Spread Function (ASF) via inverse FFT.
-        3. For each z-slice:
-             - Compute ASF as in the original implementation.
-             - Compute a 1D complex radial profile E_radial[k] via integer radius
-               bin averaging (same radial physics as before).
+        3. For each z-slice in `z_values_nm`:
+             - Compute ASF with the appropriate defocus phase.
+             - Compute a 1D complex radial profile E_radial[k] via integer
+               radius bin averaging.
              - For each pixel, evaluate E(r) at its continuous radius r using
                linear interpolation of E_radial, instead of snapping to the
                nearest radius bin.
-
-    This preserves the original Debye-Born + FFT + Mie radial behavior and decay
-    while:
-        - Removing fourfold cross/diamond artifacts (radial symmetry enforced).
-        - Avoiding per-pixel "snapping" that can make the PSF look squarish
-          on the discrete grid.
 
     Args:
         params (dict): The main simulation parameter dictionary.
         particle_diameter_nm (float): The diameter of the particle for this iPSF.
         particle_refractive_index (complex): The complex refractive index of
             the particle.
+        z_values_nm (array-like): 1D array of z positions (in nm) at which to
+            compute the iPSF stack for this particle type. This is typically a
+            type-specific range derived from the realized trajectories.
 
     Returns:
         IPSFZInterpolator: An interpolator object that can return the complex
             2D iPSF for any given z-position within the stack's range. Outside
             the range, it returns a zero field.
     """
+    # --- Validate and store z-grid ---
+    z_values = np.asarray(z_values_nm, dtype=float)
+    if z_values.ndim != 1 or z_values.size == 0:
+        raise ValueError("z_values_nm must be a non-empty 1D array.")
+    z_values_sorted = np.sort(z_values)
+    if not np.allclose(z_values_sorted, z_values):
+        # Enforce monotonic increasing order to keep interpolation logic simple.
+        z_values = z_values_sorted
+
     # --- Setup k-space coordinates and optical parameters ---
     os_factor = params["psf_oversampling_factor"]
     pupil_samples = params["pupil_samples"]
@@ -261,47 +287,32 @@ def compute_ipsf_stack(params, particle_diameter_nm, particle_refractive_index):
     radius_nm = particle_diameter_nm / 2
     x = 2 * np.pi * radius_nm / wavelength_medium_nm
 
-    # mu = cos(theta); for invalid angles (sin_theta > 1) we leave mu = 0.0,
-    # but those points are suppressed by the aperture mask anyway.
     mu = np.zeros_like(cos_theta)
     mu[valid_mask] = cos_theta[valid_mask]
 
-    # Use np.vectorize with explicit complex output types so that S1_vec and
-    # S2_vec are true numeric (complex128) arrays, not object arrays. This is
-    # critical for downstream FFT operations to behave correctly.
     mie_vec = np.vectorize(mie_S1_S2, otypes=[np.complex128, np.complex128])
     S1_vec, S2_vec = mie_vec(m, x, mu)
 
     # --- Define aberration and apodization functions ---
-    z_values = np.arange(
-        -params["z_stack_range_nm"] / 2,
-        params["z_stack_range_nm"] / 2 + 1,
-        params["z_stack_step_nm"],
-    )
     rho = sin_theta / max_sin_theta
     zernike_spherical = np.sqrt(5) * (6 * rho**4 - 6 * rho**2 + 1)
     spherical_phase = params["spherical_aberration_strength"] * zernike_spherical * 2 * np.pi
     apodization = np.exp(-params["apodization_factor"] * (rho**2))
 
     # --- Random aberration phase (static across the entire Z-stack) ---
-    # This simulates static random wavefront aberrations of a real lens system.
-    # The random phase depends only on pupil coordinates (Kx, Ky) and is fixed
-    # for the entire iPSF stack for this particle type and optical configuration.
     random_aberration_strength = float(params.get("random_aberration_strength", 0.0))
     if random_aberration_strength != 0.0:
         random_phase = (
             np.random.rand(pupil_samples, pupil_samples) - 0.5
         ) * random_aberration_strength * 2 * np.pi
     else:
-        # Use a scalar zero so that adding it to the phase arrays is cheap and
-        # does not allocate extra memory.
         random_phase = 0.0
 
     # --- Precompute radius geometry for radial symmetrization ---
     yy, xx = np.indices((pupil_samples, pupil_samples))
     center = pupil_samples // 2
-    r_float = np.sqrt((xx - center) ** 2 + (yy - center) ** 2)  # continuous radius in pixels
-    r_index = r_float.astype(np.int64)                           # integer radius bins
+    r_float = np.sqrt((xx - center) ** 2 + (yy - center) ** 2)
+    r_index = r_float.astype(np.int64)
     max_bin = int(r_index.max())
     r_index_flat = r_index.ravel()
     r_flat = r_float.ravel()
@@ -324,7 +335,6 @@ def compute_ipsf_stack(params, particle_diameter_nm, particle_refractive_index):
         asf = fftshift(ifft2(ifftshift(pupil_function)))
 
         # --- Radially symmetrize the ASF with continuous radial interpolation ---
-        # Step 1: compute 1D complex radial profile via integer radius bin averages.
         asf_flat = asf.ravel()
 
         counts = np.bincount(r_index_flat, minlength=max_bin + 1)
@@ -339,9 +349,6 @@ def compute_ipsf_stack(params, particle_diameter_nm, particle_refractive_index):
         # optical center so that the central peak normalization is unchanged.
         E_radial[0] = asf[center, center]
 
-        # Step 2: build a smooth radial field by interpolating E_radial at the
-        # continuous radius r_float for each pixel instead of snapping to the
-        # nearest integer radius bin.
         r_bins = np.arange(max_bin + 1, dtype=float)
 
         E_real_interp = np.interp(
@@ -363,7 +370,6 @@ def compute_ipsf_stack(params, particle_diameter_nm, particle_refractive_index):
 
         ipsf_stack_complex[i, :, :] = asf_radial
 
-    # Create a custom interpolator for fast lookups later.
     interpolator = IPSFZInterpolator(z_values, ipsf_stack_complex)
 
     print("iPSF stack computation complete.")

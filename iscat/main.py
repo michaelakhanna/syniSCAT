@@ -18,8 +18,8 @@ warnings.filterwarnings("ignore", category=np.RankWarning)
 
 # Hard upper bound on automatically estimated z-stack full range (in nm) to
 # avoid pathological configurations creating extremely expensive iPSF stacks.
-# This is chosen to stay at or below the "like 200000 nm" scale you explicitly
-# wanted to avoid.
+# This helper is no longer used to drive the main simulation pipeline, but is
+# retained for potential offline analysis or future tooling.
 _MAX_AUTO_Z_STACK_RANGE_NM = 200000.0
 
 
@@ -33,6 +33,12 @@ def _estimate_required_z_stack_full_range_nm(
     Estimate the full iPSF z-stack range (in nm) required for a single
     Brownian particle so that its z-position stays within the stack for the
     entire video with approximately the requested coverage_probability.
+
+    NOTE:
+        This function is kept for potential offline analysis, but the runtime
+        simulation no longer uses any global z-stack estimator to determine
+        the actual PSF z-ranges. The production pipeline now derives z-ranges
+        per particle type directly from the realized Brownian trajectories.
 
     Model:
         - 1D z-motion is Brownian with diffusion coefficient D:
@@ -109,33 +115,16 @@ def _estimate_required_z_stack_full_range_nm(
 
 def _estimate_global_z_stack_range_nm(params: dict, diameters_nm) -> float:
     """
-    Estimate a single global iPSF z-stack full range (in nm) for the current
-    simulation, based on Brownian motion statistics and the desired coverage
-    probability.
+    Legacy helper for estimating a single global iPSF z-stack full range.
 
-    Strategy:
-        - For each particle diameter, compute its diffusion coefficient D via
-          the Stokes–Einstein equation.
-        - Identify the most mobile particle (largest D).
-        - Use _estimate_required_z_stack_full_range_nm for that particle,
-          with the configured fps, duration_seconds, and
-          z_stack_coverage_probability, to obtain a required full z-stack
-          range.
-        - Clamp the result to _MAX_AUTO_Z_STACK_RANGE_NM to avoid extreme
-          computational cost.
-        - If anything goes wrong (degenerate parameters), fall back to the
-          existing PARAMS["z_stack_range_nm"].
+    IMPORTANT:
+        The main simulation pipeline no longer uses a global z-stack range to
+        drive PSF computation. Instead, per-particle-type z-ranges are derived
+        directly from the realized Brownian trajectories (see run_simulation).
 
-    This function also logs the final chosen z-stack range and the particle
-    that determined it.
-
-    Args:
-        params: Simulation parameter dictionary.
-        diameters_nm: Sequence of per-particle diameters in nanometers.
-
-    Returns:
-        float: Global z-stack full range in nanometers to be written into
-            params["z_stack_range_nm"].
+        This function is retained for potential offline analysis or tooling,
+        but its output is not used anywhere in the production rendering
+        pipeline.
     """
     num_particles = int(params["num_particles"])
     if len(diameters_nm) != num_particles:
@@ -150,23 +139,15 @@ def _estimate_global_z_stack_range_nm(params: dict, diameters_nm) -> float:
     viscosity_Pa_s = float(params["viscosity_Pa_s"])
 
     if fps <= 0.0 or duration_seconds <= 0.0:
-        # Degenerate timing: fall back immediately.
         fallback = float(params.get("z_stack_range_nm", 30500.0))
-        print(
-            "Automatic z-stack range estimation skipped due to non-positive fps "
-            "or duration; using existing PARAMS['z_stack_range_nm'] "
-            f"={fallback:.1f} nm."
-        )
         return fallback
 
     coverage_probability = float(params.get("z_stack_coverage_probability", 0.9999))
-    # Clamp into a reasonable open interval for numerical stability.
     if coverage_probability <= 0.0:
         coverage_probability = 1e-6
     if coverage_probability >= 1.0:
         coverage_probability = 1.0 - 1e-9
 
-    # Find the most mobile particle (largest D).
     max_D = 0.0
     max_D_diameter_nm = None
 
@@ -182,16 +163,9 @@ def _estimate_global_z_stack_range_nm(params: dict, diameters_nm) -> float:
             max_D_diameter_nm = d_nm
 
     if max_D <= 0.0 or max_D_diameter_nm is None:
-        # Degenerate diffusion: fall back to existing configuration.
         fallback = float(params.get("z_stack_range_nm", 30500.0))
-        print(
-            "Automatic z-stack range estimation encountered non-positive diffusion "
-            "coefficients; using existing PARAMS['z_stack_range_nm'] "
-            f"={fallback:.1f} nm."
-        )
         return fallback
 
-    # Compute required full range for the most mobile particle.
     auto_range_nm = _estimate_required_z_stack_full_range_nm(
         diffusion_coefficient_m2_s=max_D,
         fps=fps,
@@ -201,27 +175,10 @@ def _estimate_global_z_stack_range_nm(params: dict, diameters_nm) -> float:
 
     if auto_range_nm <= 0.0:
         fallback = float(params.get("z_stack_range_nm", 30500.0))
-        print(
-            "Automatic z-stack range estimation returned a non-positive value; "
-            "using existing PARAMS['z_stack_range_nm'] "
-            f"={fallback:.1f} nm instead."
-        )
         return fallback
 
-    # Clamp to the global maximum allowed range to avoid extreme compute.
     if auto_range_nm > _MAX_AUTO_Z_STACK_RANGE_NM:
-        print(
-            f"Automatic z-stack range {auto_range_nm:.1f} nm exceeds the hard cap "
-            f"{_MAX_AUTO_Z_STACK_RANGE_NM:.1f} nm; clamping to the cap. "
-            "Consider lowering 'z_stack_coverage_probability' or shortening the "
-            "video if this occurs frequently."
-        )
         auto_range_nm = _MAX_AUTO_Z_STACK_RANGE_NM
-
-    print("Estimated global iPSF z-stack range based on Brownian motion:")
-    print(f"  coverage probability target : {coverage_probability:.6f}")
-    print(f"  most mobile particle diameter: {max_D_diameter_nm:.1f} nm")
-    print(f"  resulting z_stack_range_nm   : {auto_range_nm:.1f} nm")
 
     return float(auto_range_nm)
 
@@ -231,33 +188,27 @@ def run_simulation(params: dict) -> None:
     Run the complete iSCAT simulation and video generation pipeline for a given
     parameter dictionary.
 
-    This function is the core programmatic entry point for the simulation. It
-    performs:
+    Updated architecture (fundamental change):
+        - The PSF iPSF Z-stacks are no longer based on a single global
+          z_stack_range_nm.
+        - Instead, for each unique particle type (diameter, complex index),
+          we:
+              1) Simulate trajectories for all particles.
+              2) Collect the z-positions of all particles of that type.
+              3) Compute type-specific z_min/z_max from those trajectories.
+              4) Expand that range with a safety factor and a minimum span.
+              5) Build a type-specific z grid and compute the iPSF stack only
+                 over that grid.
+        - Each particle’s interpolator therefore has its own z-range matching
+          the realized Brownian motion of its type, plus a margin. This avoids
+          both wasted computation and truncation-induced visibility loss.
 
-        1. Output directory preparation (video and masks).
-        2. Per-particle refractive index resolution from materials/overrides.
-        3. Automatic estimation of a global iPSF z-stack range based on
-           Brownian diffusion statistics and z_stack_coverage_probability.
-        4. 3D Brownian motion trajectory simulation.
-        5. Pre-computation of unique iPSF Z-stacks for each particle type.
-        6. Frame-by-frame rendering of signal/reference frames and masks.
-        7. Background subtraction, normalization, and final .mp4 encoding.
-
-    When called as:
-
-        run_simulation(PARAMS)
-
-    it reproduces the behavior of the original `main()` function, with the
-    enhancement that the z-stack range is no longer manually tuned but is
-    derived from a physically motivated probability model.
-
-    Args:
-        params (dict): Simulation parameter dictionary. Typically a dictionary
-            following the structure of config.PARAMS, possibly with overrides
-            applied (e.g., for presets or randomized generation).
+    From the user's perspective, the simulation behavior (video outputs,
+    particle visibility) remains the same or improves: particles do not
+    disappear due to PSF z-range truncation, and there is no longer a hidden
+    global z-range coupling between different particle types.
     """
     # --- Setup Output Directories ---
-    # Ensure the output directories for the video and masks exist.
     if params["mask_generation_enabled"]:
         base_mask_dir = params["mask_output_directory"]
         print(f"Checking for mask output directories at {base_mask_dir}...")
@@ -271,51 +222,37 @@ def run_simulation(params: dict) -> None:
         os.makedirs(output_dir, exist_ok=True)
 
     # --- Resolve per-particle refractive indices from materials/overrides ---
-    # This combines:
-    #   - params["particle_materials"] (if provided) -> material-based lookup, and
-    #   - params["particle_refractive_indices"] (if provided) -> explicit overrides.
-    #
-    # The result is a single complex refractive index per particle, stored back
-    # into params["particle_refractive_indices"] as a numpy array. This ensures
-    # subsequent optics code sees a consistent, resolved value regardless of how
-    # the user specified the particle properties.
     particle_refractive_indices = resolve_particle_refractive_indices(params)
     diameters_nm = params["particle_diameters_nm"]
 
-    # --- Automatic estimation of global z-stack range ---
-    # Instead of manually specifying z_stack_range_nm, estimate a single global
-    # iPSF z-stack range from Brownian motion statistics and the desired
-    # coverage probability. This ensures that smaller (more mobile) particles
-    # get a sufficiently wide z-stack while avoiding excessively large stacks.
-    try:
-        auto_z_stack_range_nm = _estimate_global_z_stack_range_nm(params, diameters_nm)
-        params["z_stack_range_nm"] = auto_z_stack_range_nm
-    except Exception as exc:
-        # Fall back gracefully to the existing configuration if anything goes wrong.
-        warnings.warn(
-            f"Automatic z-stack range estimation failed ({exc!r}); "
-            "falling back to existing PARAMS['z_stack_range_nm'] value.",
-            RuntimeWarning,
-        )
-        auto_z_stack_range_nm = float(params.get("z_stack_range_nm", 30500.0))
-        params["z_stack_range_nm"] = auto_z_stack_range_nm
-        print(
-            f"Using fallback z_stack_range_nm={auto_z_stack_range_nm:.1f} nm "
-            "for both trajectories and iPSF computation."
-        )
+    # NOTE: We intentionally no longer override params["z_stack_range_nm"]
+    # here with any automatic global estimator. The only remaining role of
+    # z_stack_range_nm is to define the initial Z-distribution in the Brownian
+    # trajectory simulation (see trajectory.simulate_trajectories). The PSF
+    # z-ranges are now derived from the realized trajectories per particle
+    # type (see below).
 
     # --- Step 1: Simulate particle movement ---
-    # This generates the 3D coordinates for each particle over time.
     trajectories_nm = simulate_trajectories(params)
 
-    # --- Step 2: Compute unique iPSF stacks ---
-    # To save computation time, only compute the iPSF once for each unique type
-    # of particle. A unique particle type is defined by its diameter and complex
-    # refractive index (n + i k) within the medium.
-    unique_particles = {}
-    print("Pre-computing unique particle iPSF stacks...")
+    # --- Step 2: Compute unique iPSF stacks with per-type trajectory-based Z-ranges ---
+    #
+    # Particle type key: (diameter_nm, n_real, n_imag), exactly as used
+    # previously for deduplication. For each type:
+    #   - Identify which particle indices share this type.
+    #   - From trajectories_nm[type_indices, :, 2], compute z_min and z_max.
+    #   - Expand this range with a safety factor and a minimum span.
+    #   - Build a type-specific z grid and compute the iPSF stack only on
+    #     that grid.
+    #
+    # This ensures that each type’s iPSF stack covers exactly the Z-range it
+    # actually visits (plus margin), and different types are not forced to
+    # share a single global axial extent.
+    print("Pre-computing unique particle iPSF stacks with trajectory-based Z-ranges...")
     num_particles = params["num_particles"]
 
+    # Map type key -> list of particle indices
+    type_to_indices = {}
     for i in range(num_particles):
         n_complex = particle_refractive_indices[i]
         key = (
@@ -323,12 +260,72 @@ def run_simulation(params: dict) -> None:
             float(n_complex.real),
             float(n_complex.imag),
         )
-        if key not in unique_particles:
-            unique_particles[key] = compute_ipsf_stack(
-                params,
-                diameters_nm[i],
-                n_complex,
+        type_to_indices.setdefault(key, []).append(i)
+
+    # Safety parameters for per-type z-range expansion.
+    z_step_nm = float(params["z_stack_step_nm"])
+    if z_step_nm <= 0.0:
+        raise ValueError("PARAMS['z_stack_step_nm'] must be positive.")
+
+    # Use the configured z_stack_range_nm as a *scale* to define a reasonable
+    # minimum span for PSF stacks, but do not use it as a global range. This
+    # avoids collapsing stacks for nearly constant trajectories while keeping
+    # visibility robust.
+    fallback_global_z_range_nm = float(params.get("z_stack_range_nm", 30500.0))
+    SAFETY_FACTOR = 1.1
+    MIN_HALF_SPAN = max(4.0 * z_step_nm, 0.1 * fallback_global_z_range_nm)
+
+    unique_particles = {}
+
+    for type_key, indices in type_to_indices.items():
+        diam_nm_type, n_real, n_imag = type_key
+        indices_array = np.asarray(indices, dtype=int)
+
+        # Extract all z positions for this type: shape (num_type_particles, num_frames)
+        z_positions_type = trajectories_nm[indices_array, :, 2]
+        z_min_realized = float(np.min(z_positions_type))
+        z_max_realized = float(np.max(z_positions_type))
+
+        # Compute center and half-span of the realized range.
+        z_center = 0.5 * (z_min_realized + z_max_realized)
+        z_half_span = 0.5 * (z_max_realized - z_min_realized)
+
+        # Expand with a safety factor and enforce a minimum half-span. This
+        # ensures that even if a type barely moves in Z (or starts at a fixed
+        # Z plane), the iPSF stack still spans a physically reasonable depth
+        # around that plane, and that rare outlier steps just outside the
+        # observed extrema are covered.
+        z_half_span_safe = max(z_half_span * SAFETY_FACTOR, MIN_HALF_SPAN)
+        z_min_safe = z_center - z_half_span_safe
+        z_max_safe = z_center + z_half_span_safe
+
+        # Construct the per-type Z grid.
+        # We include the endpoint by adding +z_step_nm to the upper bound.
+        z_values_type = np.arange(z_min_safe, z_max_safe + z_step_nm, z_step_nm)
+
+        print(
+            "  Particle type (diameter = %.1f nm, n = %.4f + %.4fi): "
+            "z_min_realized = %.1f nm, z_max_realized = %.1f nm, "
+            "expanded to [%.1f, %.1f] nm with %d slices."
+            % (
+                float(diam_nm_type),
+                float(n_real),
+                float(n_imag),
+                z_min_realized,
+                z_max_realized,
+                z_min_safe,
+                z_max_safe,
+                int(z_values_type.size),
             )
+        )
+
+        n_complex_type = complex(n_real, n_imag)
+        unique_particles[type_key] = compute_ipsf_stack(
+            params,
+            diam_nm_type,
+            n_complex_type,
+            z_values_type,
+        )
 
     # Assign the correct pre-computed iPSF interpolator to each particle.
     ipsf_interpolators = [
@@ -343,7 +340,6 @@ def run_simulation(params: dict) -> None:
     ]
 
     # --- Step 3: Generate raw video frames and masks ---
-    # This is the main rendering loop that generates the raw 16-bit data.
     raw_signal_frames, raw_reference_frames = generate_video_and_masks(
         params,
         trajectories_nm,
@@ -351,7 +347,6 @@ def run_simulation(params: dict) -> None:
     )
 
     # --- Step 4: Process frames for final video ---
-    # This performs background subtraction and normalization to 8-bit.
     final_frames = apply_background_subtraction(
         raw_signal_frames,
         raw_reference_frames,
@@ -363,7 +358,6 @@ def run_simulation(params: dict) -> None:
         return
 
     # --- Step 5: Save the final video ---
-    # Encodes the processed frames into an .mp4 file.
     img_size = (params["image_size_pixels"], params["image_size_pixels"])
     save_video(params["output_filename"], final_frames, params["fps"], img_size)
 
@@ -374,7 +368,9 @@ def main():
 
     This preserves the behavior of the original implementation so that running
     this file as a script still performs a single simulation configured by
-    config.PARAMS, with the enhancement of automatic z-stack range estimation.
+    config.PARAMS, with the enhancement that iPSF z-stacks are now sized per
+    particle type based on the realized trajectories rather than a single
+    global z-range.
     """
     run_simulation(PARAMS)
 

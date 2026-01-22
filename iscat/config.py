@@ -6,7 +6,7 @@ PARAMS = {
     # --- IMAGE & VIDEO ---
     # Linear size (both width and height) of the square output frames in pixels.
     # Must be a positive integer (e.g., 512, 1024).
-    "image_size_pixels": 512,
+    "image_size_pixels": 1024,
 
     # Physical side length of a single camera pixel in nanometers.
     # Must be a positive float. Typical values are ~100–600 nm depending on the
