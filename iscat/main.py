@@ -18,8 +18,8 @@ warnings.filterwarnings("ignore", category=np.RankWarning)
 
 # Hard upper bound on automatically estimated z-stack full range (in nm) to
 # avoid pathological configurations creating extremely expensive iPSF stacks.
-# This helper is no longer used to drive the main simulation pipeline, but is
-# retained for potential offline analysis or future tooling.
+# This constant is now also used as a global safety cap for per-type
+# trajectory-based z-ranges in run_simulation.
 _MAX_AUTO_Z_STACK_RANGE_NM = 200000.0
 
 
@@ -196,7 +196,9 @@ def run_simulation(params: dict) -> None:
               1) Simulate trajectories for all particles.
               2) Collect the z-positions of all particles of that type.
               3) Compute type-specific z_min/z_max from those trajectories.
-              4) Expand that range with a safety factor and a minimum span.
+              4) Expand that range with a safety factor and a minimum span that
+                 are independent of the potentially huge global z_stack_range_nm,
+                 and clamp the total span to a global hard cap.
               5) Build a type-specific z grid and compute the iPSF stack only
                  over that grid.
         - Each particle’s interpolator therefore has its own z-range matching
@@ -235,19 +237,110 @@ def run_simulation(params: dict) -> None:
     # --- Step 1: Simulate particle movement ---
     trajectories_nm = simulate_trajectories(params)
 
+    # --- Helper for per-type z-range expansion and grid construction ---------
+    def _build_safe_z_grid_for_type(
+        z_min_realized_nm: float,
+        z_max_realized_nm: float,
+        z_step_nm: float,
+    ) -> np.ndarray:
+        """
+        Given realized z_min/z_max (in nm) for a particle type and the desired
+        z-step (in nm), construct a monotonically increasing z-grid that:
+
+            - Contains [z_min_realized, z_max_realized].
+            - Adds a modest absolute and relative safety margin.
+            - Enforces a minimum half-span so that even nearly constant
+              trajectories get a physically reasonable axial extent.
+            - Clamps the total span to a global hard cap
+              _MAX_AUTO_Z_STACK_RANGE_NM.
+
+        This function encapsulates the trajectory-based z-stack optimization
+        (CDD Section 3.2.2) in a numerically safe way and decouples it from
+        any particular choice of PARAMS["z_stack_range_nm"].
+        """
+        z_min_realized_nm = float(z_min_realized_nm)
+        z_max_realized_nm = float(z_max_realized_nm)
+        z_step_nm = float(z_step_nm)
+
+        if z_step_nm <= 0.0:
+            raise ValueError("PARAMS['z_stack_step_nm'] must be positive.")
+
+        if z_max_realized_nm < z_min_realized_nm:
+            # Swap if numerical noise flips the ordering.
+            z_min_realized_nm, z_max_realized_nm = z_max_realized_nm, z_min_realized_nm
+
+        # Center and half-span of the realized range.
+        z_center = 0.5 * (z_min_realized_nm + z_max_realized_nm)
+        realized_half_span = 0.5 * (z_max_realized_nm - z_min_realized_nm)
+
+        # Absolute margin: cover rare excursions just outside the realized
+        # extrema. We choose 5 * z_step as a modest but meaningful margin;
+        # this is large enough that a single unusually large Brownian step
+        # beyond the trajectory sample will still be covered, without
+        # expanding the range excessively.
+        absolute_margin_nm = 5.0 * z_step_nm
+
+        # Relative margin: expand by a factor on the realized half-span. This
+        # protects against finite-sample underestimation of the true range.
+        relative_margin_factor = 0.10  # 10% inflation of the observed span
+
+        # Minimum half-span: even if realized_half_span ~ 0 (e.g., nearly
+        # constant z), we still want a physically reasonable z-stack width so
+        # that PSF interpolation is meaningful around that plane.
+        #
+        # Here we choose a value that is:
+        #   - Large compared to z_step_nm (so there are many slices).
+        #   - Small compared to the global cap, so it does not dominate
+        #     compute cost in realistic configurations.
+        #
+        # 100 * z_step_nm is a conservative and simple choice: with the
+        # default z_step_nm = 50 nm, this yields a minimum full span of
+        # 10,000 nm (±2,500 nm around z_center).
+        min_half_span_nm = 100.0 * z_step_nm
+
+        # Combine contributions into a safe half-span.
+        safe_half_span = realized_half_span
+        safe_half_span += absolute_margin_nm
+        safe_half_span *= (1.0 + relative_margin_factor)
+        safe_half_span = max(safe_half_span, min_half_span_nm)
+
+        # Enforce the global hard cap on the *full* span.
+        max_half_span_allowed = 0.5 * _MAX_AUTO_Z_STACK_RANGE_NM
+        if safe_half_span > max_half_span_allowed:
+            safe_half_span = max_half_span_allowed
+
+        z_min_safe = z_center - safe_half_span
+        z_max_safe = z_center + safe_half_span
+
+        # Construct a uniform grid including both endpoints. We add one step
+        # to the upper bound so np.arange includes z_max_safe within at most
+        # one step of overshoot.
+        z_values = np.arange(z_min_safe, z_max_safe + z_step_nm, z_step_nm, dtype=float)
+
+        # Guard against pathological cases where rounding could, in theory,
+        # produce a single slice. With the margins above and positive z_step_nm,
+        # this should not happen, but we enforce a minimum of two slices for
+        # numerical robustness of IPSFZInterpolator.
+        if z_values.size < 2:
+            z_values = np.array(
+                [z_center - z_step_nm * 0.5, z_center + z_step_nm * 0.5],
+                dtype=float,
+            )
+
+        return z_values
+
     # --- Step 2: Compute unique iPSF stacks with per-type trajectory-based Z-ranges ---
     #
     # Particle type key: (diameter_nm, n_real, n_imag), exactly as used
     # previously for deduplication. For each type:
     #   - Identify which particle indices share this type.
     #   - From trajectories_nm[type_indices, :, 2], compute z_min and z_max.
-    #   - Expand this range with a safety factor and a minimum span.
-    #   - Build a type-specific z grid and compute the iPSF stack only on
-    #     that grid.
+    #   - Build a type-specific z grid via _build_safe_z_grid_for_type.
+    #   - Compute the iPSF stack only on that grid.
     #
     # This ensures that each type’s iPSF stack covers exactly the Z-range it
-    # actually visits (plus margin), and different types are not forced to
-    # share a single global axial extent.
+    # actually visits (plus margin) while respecting a global hard cap on the
+    # axial span.
     print("Pre-computing unique particle iPSF stacks with trajectory-based Z-ranges...")
     num_particles = params["num_particles"]
 
@@ -262,18 +355,9 @@ def run_simulation(params: dict) -> None:
         )
         type_to_indices.setdefault(key, []).append(i)
 
-    # Safety parameters for per-type z-range expansion.
     z_step_nm = float(params["z_stack_step_nm"])
     if z_step_nm <= 0.0:
         raise ValueError("PARAMS['z_stack_step_nm'] must be positive.")
-
-    # Use the configured z_stack_range_nm as a *scale* to define a reasonable
-    # minimum span for PSF stacks, but do not use it as a global range. This
-    # avoids collapsing stacks for nearly constant trajectories while keeping
-    # visibility robust.
-    fallback_global_z_range_nm = float(params.get("z_stack_range_nm", 30500.0))
-    SAFETY_FACTOR = 1.1
-    MIN_HALF_SPAN = max(4.0 * z_step_nm, 0.1 * fallback_global_z_range_nm)
 
     unique_particles = {}
 
@@ -286,22 +370,12 @@ def run_simulation(params: dict) -> None:
         z_min_realized = float(np.min(z_positions_type))
         z_max_realized = float(np.max(z_positions_type))
 
-        # Compute center and half-span of the realized range.
-        z_center = 0.5 * (z_min_realized + z_max_realized)
-        z_half_span = 0.5 * (z_max_realized - z_min_realized)
-
-        # Expand with a safety factor and enforce a minimum half-span. This
-        # ensures that even if a type barely moves in Z (or starts at a fixed
-        # Z plane), the iPSF stack still spans a physically reasonable depth
-        # around that plane, and that rare outlier steps just outside the
-        # observed extrema are covered.
-        z_half_span_safe = max(z_half_span * SAFETY_FACTOR, MIN_HALF_SPAN)
-        z_min_safe = z_center - z_half_span_safe
-        z_max_safe = z_center + z_half_span_safe
-
-        # Construct the per-type Z grid.
-        # We include the endpoint by adding +z_step_nm to the upper bound.
-        z_values_type = np.arange(z_min_safe, z_max_safe + z_step_nm, z_step_nm)
+        # Build a safe, type-specific z grid based on the realized extremes.
+        z_values_type = _build_safe_z_grid_for_type(
+            z_min_realized_nm=z_min_realized,
+            z_max_realized_nm=z_max_realized,
+            z_step_nm=z_step_nm,
+        )
 
         print(
             "  Particle type (diameter = %.1f nm, n = %.4f + %.4fi): "
@@ -313,8 +387,8 @@ def run_simulation(params: dict) -> None:
                 float(n_imag),
                 z_min_realized,
                 z_max_realized,
-                z_min_safe,
-                z_max_safe,
+                float(z_values_type[0]),
+                float(z_values_type[-1]),
                 int(z_values_type.size),
             )
         )
