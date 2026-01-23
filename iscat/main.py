@@ -12,6 +12,7 @@ from trajectory import simulate_trajectories, stokes_einstein_diffusion_coeffici
 from optics import compute_ipsf_stack
 from rendering import generate_video_and_masks
 from postprocessing import apply_background_subtraction, save_video
+from particle_model import build_particle_types_and_instances  # new structured model
 
 # Suppress RankWarning from numpy's polyfit, which can occur in Mie scattering calculations
 warnings.filterwarnings("ignore", category=np.RankWarning)
@@ -209,6 +210,12 @@ def run_simulation(params: dict) -> None:
     particle visibility) remains the same or improves: particles do not
     disappear due to PSF z-range truncation, and there is no longer a hidden
     global z-range coupling between different particle types.
+
+    In addition, this function now constructs explicit ParticleType and
+    ParticleInstance objects (see particle_model.py) from the same per-type
+    iPSF stacks and per-particle trajectories. These objects are not yet used
+    by downstream modules, so behavior remains identical; they provide a
+    structured foundation for future refactors (e.g., non-spherical particles).
     """
     # --- Setup Output Directories ---
     if params["mask_generation_enabled"]:
@@ -359,7 +366,8 @@ def run_simulation(params: dict) -> None:
     if z_step_nm <= 0.0:
         raise ValueError("PARAMS['z_stack_step_nm'] must be positive.")
 
-    unique_particles = {}
+    # For each type, compute the iPSF stack and store it keyed by type_key.
+    ipsf_interpolators_by_type = {}
 
     for type_key, indices in type_to_indices.items():
         diam_nm_type, n_real, n_imag = type_key
@@ -394,16 +402,17 @@ def run_simulation(params: dict) -> None:
         )
 
         n_complex_type = complex(n_real, n_imag)
-        unique_particles[type_key] = compute_ipsf_stack(
+        ipsf_interpolators_by_type[type_key] = compute_ipsf_stack(
             params,
             diam_nm_type,
             n_complex_type,
             z_values_type,
         )
 
-    # Assign the correct pre-computed iPSF interpolator to each particle.
+    # Assign the correct pre-computed iPSF interpolator to each particle
+    # in the legacy array form expected by the current rendering pipeline.
     ipsf_interpolators = [
-        unique_particles[
+        ipsf_interpolators_by_type[
             (
                 diameters_nm[i],
                 float(particle_refractive_indices[i].real),
@@ -412,6 +421,26 @@ def run_simulation(params: dict) -> None:
         ]
         for i in range(num_particles)
     ]
+
+    # --- Step 2b: Build ParticleType and ParticleInstance objects -------------
+    #
+    # This is a structural abstraction over the same data just used to build
+    # ipsf_interpolators. It does not change downstream behavior yet: the
+    # legacy arrays (trajectories_nm and ipsf_interpolators) are still passed
+    # to generate_video_and_masks. The particle_types and particle_instances
+    # can be used in later refactors to simplify rendering and to support
+    # non-spherical/composite particles.
+    particle_types, particle_instances = build_particle_types_and_instances(
+        params=params,
+        trajectories_nm=trajectories_nm,
+        particle_refractive_indices=particle_refractive_indices,
+        ipsf_interpolators_by_type=ipsf_interpolators_by_type,
+    )
+
+    # NOTE: We currently do not pass particle_types / particle_instances into
+    # the rendering pipeline, in order to preserve exact behavior. They are
+    # constructed here so that the rest of the codebase can gradually adopt
+    # them without changing how trajectories or iPSF stacks are computed.
 
     # --- Step 3: Generate raw video frames and masks ---
     raw_signal_frames, raw_reference_frames = generate_video_and_masks(
@@ -444,7 +473,8 @@ def main():
     this file as a script still performs a single simulation configured by
     config.PARAMS, with the enhancement that iPSF z-stacks are now sized per
     particle type based on the realized trajectories rather than a single
-    global z-range.
+    global z-range, and explicit ParticleType/ParticleInstance objects are
+    constructed for future use.
     """
     run_simulation(PARAMS)
 

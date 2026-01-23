@@ -284,7 +284,7 @@ PARAMS = {
     #
     # For backward compatibility with older configurations, the legacy option
     # string "video_mean" is accepted as an exact alias for "video_median".
-    "background_subtraction_method": "reference_frame",
+    "background_subtraction_method": "video_median",
 
     # --- MOTION BLUR ---
     # Toggle for motion blur simulation.
