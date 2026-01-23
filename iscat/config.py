@@ -11,7 +11,7 @@ PARAMS = {
     # Physical side length of a single camera pixel in nanometers.
     # Must be a positive float. Typical values are ~100–600 nm depending on the
     # objective and camera pixel pitch.
-    "pixel_size_nm": 600,
+    "pixel_size_nm": 200,
 
     # Frame rate (frames per second) of the output video.
     # Positive float or int. Combined with duration_seconds determines the

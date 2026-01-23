@@ -424,48 +424,38 @@ def generate_video_and_masks(params, trajectories, ipsf_interpolators):
                 E_sca_2D = ipsf_interpolators[i]([pz])[0]
 
                 # Upscale to the oversampled resolution for higher accuracy placement.
-                # Instead of cv2.resize (separable, axis-biased), we radially resample
-                # the PSF from the central radial profile to preserve rotational symmetry.
+                # This logic is corrected to be physically accurate. The resampling
+                # is now done in physical units (nm) rather than pixel units, so that
+                # the rendered PSF size correctly scales with pixel_size_nm.
                 if os_factor > 1:
-                    psf_size = E_sca_2D.shape[0]
-                    center_psf = psf_size // 2
-
-                    # 1D radial profile from the central row. compute_ipsf_stack has
-                    # already enforced radial symmetry, so any radial line is valid.
+                    pupil_samples = E_sca_2D.shape[0]
+                    center_psf = pupil_samples // 2
                     E_radial_line = E_sca_2D[center_psf, center_psf:]
-
                     max_bin_psf = E_radial_line.size - 1
-                    if max_bin_psf <= 0:
-                        E_sca_2D_rescaled = np.zeros((os_size, os_size), dtype=np.complex128)
-                    else:
-                        # Radii in PSF pixel units: 0,1,2,...,max_bin_psf
-                        r_bins = np.arange(max_bin_psf + 1, dtype=float)
 
-                        # Map oversampled radii (os_size grid) back to PSF radii.
-                        # This uses the same index-space scaling as a 512->os_size resize:
-                        #   r_psf = r_os * (psf_size / os_size)
-                        scale = psf_size / float(os_size)
-                        r_src = r_os_flat * scale
+                    if max_bin_psf > 0:
+                        # Define physical coordinate systems for both source and target grids.
+                        # Source grid (from optics.py):
+                        nm_per_pixel_psf = (img_size * pixel_size_nm) / (os_factor * pupil_samples)
+                        r_bins_nm = np.arange(max_bin_psf + 1) * nm_per_pixel_psf
 
+                        # Target grid (oversampled rendering grid):
+                        nm_per_pixel_os = pixel_size_nm / os_factor
+                        r_os_nm = r_os_flat * nm_per_pixel_os
+
+                        # Interpolate from source physical radii to target physical radii.
                         E_real_interp = np.interp(
-                            r_src,
-                            r_bins,
-                            E_radial_line.real,
-                            left=E_radial_line.real[0],
-                            right=0.0,
+                            r_os_nm, r_bins_nm, E_radial_line.real, right=0.0
                         )
                         E_imag_interp = np.interp(
-                            r_src,
-                            r_bins,
-                            E_radial_line.imag,
-                            left=E_radial_line.imag[0],
-                            right=0.0,
+                            r_os_nm, r_bins_nm, E_radial_line.imag, right=0.0
                         )
                         E_sca_2D_rescaled = (
                             E_real_interp + 1j * E_imag_interp
                         ).reshape(os_size, os_size)
+                    else:
+                        E_sca_2D_rescaled = np.zeros((os_size, os_size), dtype=np.complex128)
                 else:
-                    # No oversampling: work directly at the final resolution.
                     E_sca_2D_rescaled = E_sca_2D
 
                 # --- Position the PSF on the padded oversampled canvas using explicit clipping ---
