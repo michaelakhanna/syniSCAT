@@ -213,9 +213,11 @@ def run_simulation(params: dict) -> None:
 
     In addition, this function now constructs explicit ParticleType and
     ParticleInstance objects (see particle_model.py) from the same per-type
-    iPSF stacks and per-particle trajectories. These objects are not yet used
-    by downstream modules, so behavior remains identical; they provide a
-    structured foundation for future refactors (e.g., non-spherical particles).
+    iPSF stacks and per-particle trajectories. These objects are now passed
+    into the rendering pipeline, which consumes them as the single source of
+    per-particle state. This makes the particle representation explicit and
+    prepares the codebase for future extensions (e.g., non-spherical shapes)
+    without changing user-visible behavior.
     """
     # --- Setup Output Directories ---
     if params["mask_generation_enabled"]:
@@ -337,17 +339,6 @@ def run_simulation(params: dict) -> None:
         return z_values
 
     # --- Step 2: Compute unique iPSF stacks with per-type trajectory-based Z-ranges ---
-    #
-    # Particle type key: (diameter_nm, n_real, n_imag), exactly as used
-    # previously for deduplication. For each type:
-    #   - Identify which particle indices share this type.
-    #   - From trajectories_nm[type_indices, :, 2], compute z_min and z_max.
-    #   - Build a type-specific z grid via _build_safe_z_grid_for_type.
-    #   - Compute the iPSF stack only on that grid.
-    #
-    # This ensures that each type’s iPSF stack covers exactly the Z-range it
-    # actually visits (plus margin) while respecting a global hard cap on the
-    # axial span.
     print("Pre-computing unique particle iPSF stacks with trajectory-based Z-ranges...")
     num_particles = params["num_particles"]
 
@@ -410,7 +401,7 @@ def run_simulation(params: dict) -> None:
         )
 
     # Assign the correct pre-computed iPSF interpolator to each particle
-    # in the legacy array form expected by the current rendering pipeline.
+    # in the legacy array form expected by earlier versions of the pipeline.
     ipsf_interpolators = [
         ipsf_interpolators_by_type[
             (
@@ -424,12 +415,10 @@ def run_simulation(params: dict) -> None:
 
     # --- Step 2b: Build ParticleType and ParticleInstance objects -------------
     #
-    # This is a structural abstraction over the same data just used to build
-    # ipsf_interpolators. It does not change downstream behavior yet: the
-    # legacy arrays (trajectories_nm and ipsf_interpolators) are still passed
-    # to generate_video_and_masks. The particle_types and particle_instances
-    # can be used in later refactors to simplify rendering and to support
-    # non-spherical/composite particles.
+    # ParticleType/ParticleInstance provide a structured view over the same
+    # data used to build ipsf_interpolators. They are now the primary
+    # representation consumed by the rendering pipeline; the legacy arrays
+    # remain available for any tooling or analysis code that expects them.
     particle_types, particle_instances = build_particle_types_and_instances(
         params=params,
         trajectories_nm=trajectories_nm,
@@ -437,16 +426,14 @@ def run_simulation(params: dict) -> None:
         ipsf_interpolators_by_type=ipsf_interpolators_by_type,
     )
 
-    # NOTE: We currently do not pass particle_types / particle_instances into
-    # the rendering pipeline, in order to preserve exact behavior. They are
-    # constructed here so that the rest of the codebase can gradually adopt
-    # them without changing how trajectories or iPSF stacks are computed.
-
     # --- Step 3: Generate raw video frames and masks ---
+    # The rendering pipeline now works with ParticleInstance objects. This
+    # does not change the observable behavior of the simulation, but it
+    # centralizes all per-particle state (trajectory, type, amplitude) in a
+    # single structured interface.
     raw_signal_frames, raw_reference_frames = generate_video_and_masks(
         params,
-        trajectories_nm,
-        ipsf_interpolators,
+        particle_instances,
     )
 
     # --- Step 4: Process frames for final video ---
@@ -474,7 +461,8 @@ def main():
     config.PARAMS, with the enhancement that iPSF z-stacks are now sized per
     particle type based on the realized trajectories rather than a single
     global z-range, and explicit ParticleType/ParticleInstance objects are
-    constructed for future use.
+    constructed and passed into the rendering pipeline as the primary
+    particle representation.
     """
     run_simulation(PARAMS)
 
