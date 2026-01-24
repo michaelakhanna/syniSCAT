@@ -177,14 +177,201 @@ def _accumulate_psf_on_canvas(canvas, psf, center_x, center_y):
     canvas[y0_c:y1_c, x0_c:x1_c] += psf[ky0:ky1, kx0:kx1]
 
 
+def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
+    """
+    Convert a 3x3 rotation matrix to a unit quaternion [w, x, y, z].
+
+    The formula follows a standard numerically stable branch-based approach.
+    Input is assumed to be a proper rotation matrix (orthonormal, det ~ 1).
+    """
+    R = np.asarray(R, dtype=float)
+    if R.shape != (3, 3):
+        raise ValueError("Rotation matrix must have shape (3, 3).")
+
+    trace = float(R[0, 0] + R[1, 1] + R[2, 2])
+    if trace > 0.0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    else:
+        # Find the largest diagonal element and proceed accordingly.
+        if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(max(1.0 + R[0, 0] - R[1, 1] - R[2, 2], 0.0))
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(max(1.0 + R[1, 1] - R[0, 0] - R[2, 2], 0.0))
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(max(1.0 + R[2, 2] - R[0, 0] - R[1, 1], 0.0))
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+
+    q = np.array([w, x, y, z], dtype=float)
+    norm = np.linalg.norm(q)
+    if norm == 0.0:
+        # Fallback: identity quaternion.
+        return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
+    return q / norm
+
+
+def _quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
+    """
+    Convert a unit quaternion [w, x, y, z] to a 3x3 rotation matrix.
+    """
+    q = np.asarray(q, dtype=float)
+    if q.shape != (4,):
+        raise ValueError("Quaternion must have shape (4,) as [w, x, y, z].")
+
+    w, x, y, z = q
+    # Ensure unit length to guard against numerical drift.
+    norm = np.linalg.norm(q)
+    if norm == 0.0:
+        w, x, y, z = 1.0, 0.0, 0.0, 0.0
+    else:
+        w /= norm
+        x /= norm
+        y /= norm
+        z /= norm
+
+    ww = w * w
+    xx = x * x
+    yy = y * y
+    zz = z * z
+
+    wx = w * x
+    wy = w * y
+    wz = w * z
+    xy = x * y
+    xz = x * z
+    yz = y * z
+
+    R = np.array(
+        [
+            [ww + xx - yy - zz, 2.0 * (xy - wz),       2.0 * (xz + wy)],
+            [2.0 * (xy + wz),       ww - xx + yy - zz, 2.0 * (yz - wx)],
+            [2.0 * (xz - wy),       2.0 * (yz + wx),   ww - xx - yy + zz],
+        ],
+        dtype=float,
+    )
+    return R
+
+
+def _slerp_quaternions(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
+    """
+    Spherical linear interpolation (slerp) between two unit quaternions.
+
+    q(t) = slerp(q0, q1; t), where t in [0, 1].
+
+    Handles the antipodal ambiguity by flipping q1 if needed so that the
+    interpolation follows the shortest path on the 4D unit sphere.
+    """
+    q0 = np.asarray(q0, dtype=float)
+    q1 = np.asarray(q1, dtype=float)
+    if q0.shape != (4,) or q1.shape != (4,):
+        raise ValueError("Quaternions must have shape (4,) as [w, x, y, z].")
+
+    # Normalize inputs to guard against numerical drift.
+    q0 = q0 / (np.linalg.norm(q0) or 1.0)
+    q1 = q1 / (np.linalg.norm(q1) or 1.0)
+
+    dot = float(np.dot(q0, q1))
+
+    # If dot < 0, negate q1 to take the shorter path.
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+
+    # Clamp to avoid numerical issues with acos.
+    dot = min(max(dot, -1.0), 1.0)
+
+    if dot > 0.9995:
+        # Quaternions are nearly identical; use linear interpolation.
+        q = (1.0 - t) * q0 + t * q1
+        norm = np.linalg.norm(q)
+        return q / (norm or 1.0)
+
+    theta_0 = np.arccos(dot)
+    sin_theta_0 = np.sin(theta_0)
+    theta = theta_0 * t
+    sin_theta = np.sin(theta)
+
+    s0 = np.sin(theta_0 - theta) / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+
+    q = s0 * q0 + s1 * q1
+    return q / (np.linalg.norm(q) or 1.0)
+
+
+def _interpolate_orientation_for_instance(
+    instance: ParticleInstance,
+    time_index_float: float,
+) -> np.ndarray | None:
+    """
+    Interpolate the orientation of a particle instance at a fractional frame index.
+
+    Args:
+        instance (ParticleInstance): The particle for which to compute orientation.
+        time_index_float (float): Fractional frame index, e.g., 3.25 means
+            25% of the way between discrete frames 3 and 4.
+
+    Returns:
+        np.ndarray | None:
+            - 3x3 rotation matrix for the interpolated orientation if
+              orientation_matrices is defined.
+            - None if the instance has no orientation_matrices (spherical
+              particle or rotational diffusion disabled).
+    """
+    orientations = instance.orientation_matrices
+    if orientations is None:
+        return None
+
+    num_frames = orientations.shape[0]
+    if num_frames == 0:
+        return None
+
+    # Clamp time index into [0, num_frames - 1].
+    t = float(time_index_float)
+    if t <= 0.0:
+        return orientations[0]
+    if t >= num_frames - 1:
+        return orientations[-1]
+
+    t_floor = int(np.floor(t))
+    t_ceil = t_floor + 1
+    alpha = t - t_floor
+
+    if t_ceil >= num_frames:
+        # Degenerate edge case; fall back to the last frame orientation.
+        return orientations[-1]
+
+    R0 = orientations[t_floor]
+    R1 = orientations[t_ceil]
+
+    # Convert to quaternions, slerp, then back to a rotation matrix.
+    q0 = _rotation_matrix_to_quaternion(R0)
+    q1 = _rotation_matrix_to_quaternion(R1)
+    q_interp = _slerp_quaternions(q0, q1, alpha)
+    return _quaternion_to_rotation_matrix(q_interp)
+
+
 def _iter_subparticle_render_info(
     instance: ParticleInstance,
     base_position_nm: np.ndarray,
-    frame_index: int,
+    orientation_matrix: np.ndarray | None,
 ) -> list[tuple[np.ndarray, object, float]]:
     """
     Compute the list of sub-particle render instructions for a given particle
-    instance at a given (possibly interpolated) position and frame.
+    instance at a given (possibly interpolated) position and orientation.
 
     Each returned tuple has the form:
         (world_position_nm, ipsf_interpolator, local_signal_multiplier)
@@ -203,23 +390,20 @@ def _iter_subparticle_render_info(
           with local_signal_multiplier=1.0. Orientation is ignored because
           the PSF is radially symmetric.
 
-    Composite behavior (structural, forward-compatible):
+    Composite behavior:
         - When instance.particle_type.is_composite == True and sub_particles
           are defined:
-            * If instance.orientation_matrices is not None, we take the
-              3x3 rotation matrix at this frame_index and apply it to each
+            * If orientation_matrix is not None, it is treated as the body-to-
+              lab rotation matrix at the current time. It is applied to each
               SubParticle.offset_nm to obtain a rotated offset in world
               coordinates.
-            * If orientation_matrices is None, offsets are treated as already
+            * If orientation_matrix is None, offsets are treated as already
               expressed in world coordinates (no rotation).
             * The rotated (or raw) offset is added to base_position_nm to
               obtain the world position for each sub-particle.
 
-        - This function does not change any current outputs because:
-            * The default PARAMS does not define any composite shapes, so
-              is_composite is False for all particles.
-            * rotational_diffusion_enabled defaults to False, so
-              orientation_matrices is None for all particles.
+    This function is intentionally stateless with respect to the frame index;
+    the caller is responsible for supplying any time-dependent orientation.
     """
     ptype: ParticleType = instance.particle_type
 
@@ -241,15 +425,13 @@ def _iter_subparticle_render_info(
             "base_position_nm must be a length-3 vector [x, y, z] in nm."
         )
 
-    # Determine the rotation matrix for this frame, if available.
     R = None
-    if instance.orientation_matrices is not None:
-        if frame_index < 0 or frame_index >= instance.orientation_matrices.shape[0]:
-            raise IndexError(
-                f"frame_index={frame_index} is out of range for "
-                f"orientation_matrices shape {instance.orientation_matrices.shape}."
+    if orientation_matrix is not None:
+        R = np.asarray(orientation_matrix, dtype=float)
+        if R.shape != (3, 3):
+            raise ValueError(
+                "orientation_matrix must be a 3x3 rotation matrix when provided."
             )
-        R = instance.orientation_matrices[frame_index]
 
     sub_infos: list[tuple[np.ndarray, object, float]] = []
     for sub in ptype.sub_particles:
@@ -308,6 +490,9 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
         - Particle positions for motion blur are sampled uniformly over this
           exposure window and interpolated between the stored trajectory
           positions at integer frame times.
+        - For particles with orientation_matrices, orientations are
+          interpolated in time (via quaternion slerp) so that translational
+          and rotational motion are sampled at the same sub-frame times.
 
     This function uses ParticleInstance objects as the single source of truth
     for per-particle state (trajectory, iPSF interpolator, amplitude, and
@@ -501,6 +686,11 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
             current_time = start_time + (s + 0.5) * sub_dt
 
             normalized_time = current_time / frame_interval_s
+            # normalized_time is measured in "frame intervals", so it is a
+            # fractional frame index: 0.0 at the first frame center, 1.0 at
+            # the second, etc.
+            time_index_float = normalized_time
+
             frame_idx_floor = int(np.floor(normalized_time))
             if frame_idx_floor < 0:
                 frame_idx_floor = 0
@@ -513,8 +703,9 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                 frame_idx_ceil = frame_idx_floor + 1
                 interp_factor = normalized_time - frame_idx_floor
 
-            # Interpolate positions for each particle instance between discrete
-            # trajectory samples at integer frame indices.
+            # Interpolate positions and orientations for each particle instance
+            # between discrete trajectory/orientation samples at integer frame
+            # indices.
             for i, instance in enumerate(particle_instances):
                 traj = instance.trajectory_nm  # shape (num_frames, 3)
                 # Safety check: ensure the trajectory length matches num_frames.
@@ -528,13 +719,19 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                 pos_ceil = traj[frame_idx_ceil]
                 current_pos_nm = (1.0 - interp_factor) * pos_floor + interp_factor * pos_ceil
 
+                # Orientation interpolation is handled by a dedicated helper.
+                orientation_matrix = _interpolate_orientation_for_instance(
+                    instance=instance,
+                    time_index_float=time_index_float,
+                )
+
                 # For spherical particles, this yields a single entry; for
                 # composite types, it may yield multiple sub-particles with
                 # rotated offsets.
                 sub_infos = _iter_subparticle_render_info(
                     instance=instance,
                     base_position_nm=current_pos_nm,
-                    frame_index=frame_idx_floor,
+                    orientation_matrix=orientation_matrix,
                 )
 
                 for world_pos_nm, sub_interp, local_multiplier in sub_infos:
