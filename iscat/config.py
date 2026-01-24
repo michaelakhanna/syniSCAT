@@ -125,7 +125,7 @@ PARAMS = {
     # Stokes–Einstein equation (CDD Section 3.2.2). Individual sub-particles
     # within a composite shape may use the same or different diameters for
     # their optical PSFs; those are defined in composite_shape_library.
-    "particle_diameters_nm": [100, 60],
+    "particle_diameters_nm": [100, 150],
 
     # Complex refractive index (n + i k) of each particle.
     # List/sequence of length num_particles. Each entry can be:
@@ -243,6 +243,10 @@ PARAMS = {
     # ("h2o_like") with three sub-particles: one central and two at symmetric
     # offsets in the x–y plane. All sub-particles inherit the parent particle's
     # diameter and refractive index, so no additional iPSF types are required.
+    #
+    # Offsets are chosen on the order of the pixel size so that the composite
+    # is visually non-spherical at the default 600 nm pixels: the two arms are
+    # ~1 pixel away from the center in opposite directions.
     "composite_shape_library": {
         "h2o_like": {
             "sub_particles": [
@@ -254,18 +258,16 @@ PARAMS = {
                     "signal_multiplier": 1.0,
                 },
                 {
-                    # First "arm" offset; magnitude ~50 nm in-plane.
-                    "offset_nm": [50.0, 0.0, 0.0],
+                    # First "arm" offset; magnitude ~1 pixel in-plane for the
+                    # default 600 nm pixel size.
+                    "offset_nm": [600.0, 0.0, 0.0],
                     "diameter_nm": None,
                     "refractive_index": None,
                     "signal_multiplier": 1.0,
                 },
                 {
                     # Second "arm" offset; symmetric around the x-axis.
-                    # Here we choose an angle of ~125 degrees between arms
-                    # conceptually, but keep the actual offset simple in this
-                    # minimal configuration while still clearly non-spherical.
-                    "offset_nm": [-50.0, 0.0, 0.0],
+                    "offset_nm": [-600.0, 0.0, 0.0],
                     "diameter_nm": None,
                     "refractive_index": None,
                     "signal_multiplier": 1.0,
@@ -329,8 +331,8 @@ PARAMS = {
     #       around a random axis when rotational_diffusion_enabled is True.
     #       For future non-spherical composites this controls how quickly
     #       orientations change. Default is 5 degrees when enabled.
-    "rotational_diffusion_enabled": False,
-    "rotational_step_std_deg": 5.0,
+    "rotational_diffusion_enabled": True,
+    "rotational_step_std_deg": 10.0,
 
     # --- iPSF & SCATTERING CALCULATION ---
     # Oversampling factor for the internal PSF/canvas resolution.
