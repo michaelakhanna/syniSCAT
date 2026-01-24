@@ -1,3 +1,4 @@
+# File: trajectory.py
 import numpy as np
 from config import BOLTZMANN_CONSTANT
 from chip_pattern import is_position_in_chip_solid, project_position_to_fluid_region
@@ -450,6 +451,13 @@ def simulate_orientations(params: dict, num_particles: int, num_frames: int) -> 
           will be implemented when rotational appearance matters for
           non-spherical composites.
 
+    RNG and reproducibility:
+        - Rotational steps are driven by per-particle NumPy Generators whose
+          seeds are drawn from the global np.random RNG. Since the dataset
+          generator seeds np.random once per video, translational and
+          rotational Brownian motion remain tied to the same per-video seed
+          and are fully reproducible under the existing seeding scheme.
+
     Args:
         params (dict): Simulation parameter dictionary (PARAMS). Must contain
             "fps" when rotational_diffusion_enabled is True.
@@ -493,20 +501,30 @@ def simulate_orientations(params: dict, num_particles: int, num_frames: int) -> 
         )
     step_std_rad = np.deg2rad(step_std_deg)
 
-    # Use the global np.random RNG for reproducibility under the same seeding
-    # as translational Brownian motion, matching the rest of the pipeline.
-    rng = np.random.default_rng()
+    # Derive a deterministic set of per-particle seeds from the global
+    # np.random RNG. The dataset generator seeds np.random once per video,
+    # so drawing seeds here keeps rotational trajectories reproducible under
+    # the same per-video seed used for translational trajectories and noise.
+    #
+    # We restrict seeds to a safe 32-bit range compatible with default_rng.
+    particle_seeds_int = np.random.randint(
+        0,
+        2**31,
+        size=num_particles,
+        dtype=np.int64,
+    )
 
     # Allocate orientation array and initialize all particles to identity
     # orientation at frame 0.
     orientations = np.zeros((num_particles, num_frames, 3, 3), dtype=float)
     orientations[:, 0, :, :] = np.eye(3, dtype=float)
 
-    # Perform a random walk on SO(3) for each particle.
+    # Perform a random walk on SO(3) for each particle using its own Generator.
     for i in range(num_particles):
+        rng_i = np.random.default_rng(int(particle_seeds_int[i]))
         for t in range(1, num_frames):
             R_prev = orientations[i, t - 1]
-            R_step = _random_small_rotation_matrix(rng, step_std_rad)
+            R_step = _random_small_rotation_matrix(rng_i, step_std_rad)
             # Post-multiply so that R_t maps body frame to lab frame after
             # applying the incremental rotation.
             orientations[i, t] = R_step @ R_prev
