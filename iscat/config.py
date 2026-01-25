@@ -246,7 +246,9 @@ PARAMS = {
     #
     # Offsets are chosen on the order of the pixel size so that the composite
     # is visually non-spherical at the default 600 nm pixels: the two arms are
-    # ~1 pixel away from the center in opposite directions.
+    # several pixels away from the center in opposite directions, and their
+    # rotation under Brownian orientations produces clearly changing
+    # cross-sections over time.
     "composite_shape_library": {
         "h2o_like": {
             "sub_particles": [
@@ -258,8 +260,9 @@ PARAMS = {
                     "signal_multiplier": 1.0,
                 },
                 {
-                    # First "arm" offset; magnitude ~1 pixel in-plane for the
-                    # default 600 nm pixel size.
+                    # First "arm" offset; magnitude chosen so that the arm is
+                    # clearly separated from the central lobe at the default
+                    # 600 nm pixel size (here ~4 pixels in-plane).
                     "offset_nm": [2400.0, 0.0, 0.0],
                     "diameter_nm": None,
                     "refractive_index": None,
@@ -317,20 +320,21 @@ PARAMS = {
     # Rotational Brownian motion configuration for non-spherical particles.
     #
     # These settings control simulate_orientations (trajectory.py). In the
-    # current default configuration rotational diffusion is disabled, so
-    # orientation_matrices is None for all particles and the renderer behaves
-    # identically to the original spherical-only implementation, except that
-    # composite shapes are rigid (fixed orientation).
+    # current default configuration rotational diffusion is enabled so that
+    # composite particles like 'h2o_like' visibly change orientation over
+    # time. Spherical particles ignore orientation because their PSF is
+    # radially symmetric.
     #
     #   "rotational_diffusion_enabled":
-    #       When False (default), no orientations are simulated and all
+    #       When False, no orientations are simulated and all
     #       ParticleInstance.orientation_matrices are set to None.
     #
     #   "rotational_step_std_deg":
     #       Standard deviation of the per-frame rotation angle (in degrees)
     #       around a random axis when rotational_diffusion_enabled is True.
-    #       For future non-spherical composites this controls how quickly
-    #       orientations change. Default is 5 degrees when enabled.
+    #       For non-spherical composites this controls how quickly orientations
+    #       change. Values in the range ~5–15 degrees/frame produce smooth
+    #       but noticeable orientation changes over a 1 s video at 24 fps.
     "rotational_diffusion_enabled": True,
     "rotational_step_std_deg": 10.0,
 
