@@ -13,6 +13,8 @@ Core responsibilities:
     - Ensure that each video and its corresponding masks are written to
       unique, organized output locations.
     - Invoke run_simulation(params) once per video.
+    - Construct and save per-video and dataset-level metadata manifests
+      describing the generated samples in a machine-readable format.
 
 Randomness & reproducibility:
     - A dataset-level seed (random_seed) controls a master NumPy Generator.
@@ -29,13 +31,14 @@ Randomness & reproducibility:
     generation process fully reproducible.
 
 The underlying simulation (config, trajectory, optics, rendering, etc.)
-remains unchanged. This module only orchestrates multiple runs.
+remains unchanged. This module only orchestrates multiple runs and adds
+dataset-level metadata/manifest emission.
 """
 
 import argparse
 import os
 from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import numpy as np
 
@@ -44,6 +47,12 @@ from main import run_simulation
 from presets import (
     apply_instrument_preset,
     create_params_for_experiment,
+)
+from metadata import (
+    build_video_manifest,
+    save_video_manifest,
+    build_dataset_index_entry,
+    save_dataset_manifest,
 )
 
 
@@ -143,7 +152,9 @@ def generate_dataset(
 
     This function is the main programmatic entry point for dataset generation.
     It repeatedly constructs a fresh parameter dictionary for each video, sets
-    unique output paths, and calls run_simulation(params).
+    unique output paths, and calls run_simulation(params). For each video it
+    also constructs and saves a per-video manifest JSON file and accumulates
+    a minimal dataset-level index entry.
 
     Preset selection:
         - If experiment_preset is provided, it is used to construct the full
@@ -169,11 +180,19 @@ def generate_dataset(
                         ...
                 video_0001/
                     ...
+            metadata/
+                video_0000.json
+                video_0001.json
+                ...
+            dataset_manifest.json
 
     This layout ensures that:
         - Each video file has a unique filename.
-        - Each video's masks are isolated in their own subtree, avoiding any
-          collisions between runs.
+        - Each video's masks are isolated in their own subtree.
+        - Each video has a corresponding JSON manifest describing its
+          parameters and particle attributes.
+        - A single dataset_manifest.json summarizes all videos for easy
+          iteration by downstream ML code.
 
     Randomness and reproducibility:
         - A dataset-level master RNG is constructed as:
@@ -228,6 +247,9 @@ def generate_dataset(
     # Limit seeds to a safe 32-bit range compatible with np.random.seed.
     max_seed_value = 2 ** 31
 
+    # Accumulate dataset-level manifest entries here.
+    dataset_entries: List[Dict[str, Any]] = []
+
     print(
         f"Generating {num_videos} video(s) "
         f"using experiment_preset={experiment_preset!r}, "
@@ -273,6 +295,31 @@ def generate_dataset(
         # Run the full simulation pipeline for this video.
         run_simulation(params)
 
+        # After the simulation completes, build and save the per-video manifest.
+        manifest = build_video_manifest(
+            params=params,
+            base_output_dir=base_output_dir,
+            video_index=video_index,
+            experiment_preset=experiment_preset,
+            instrument_preset=instrument_preset,
+            video_seed=video_seed,
+        )
+        manifest_path = save_video_manifest(
+            manifest=manifest,
+            base_output_dir=base_output_dir,
+            video_index=video_index,
+        )
+        print(f"Saved per-video manifest to {manifest_path}")
+
+        # Append a minimal dataset-level index entry.
+        dataset_entries.append(build_dataset_index_entry(manifest))
+
+    # After all videos are generated, write the dataset-level manifest.
+    dataset_manifest_path = save_dataset_manifest(
+        base_output_dir=base_output_dir,
+        dataset_entries=dataset_entries,
+    )
+    print(f"\nDataset-level manifest written to {dataset_manifest_path}")
     print("\nDataset generation complete.")
 
 
