@@ -51,6 +51,10 @@ class _FeatureLayout:
         features_by_cell (dict): Mapping (i, j) -> _LatticeFeature.
         i_min, i_max, j_min, j_max (int): Lattice index bounds that cover the
             full field-of-view (with margin) for the current run.
+        offset_x_um, offset_y_um (float): Global pattern offset in micrometers
+            applied to the entire lattice. These are sampled once per layout
+            build and ensure that the chip pattern is globally shifted relative
+            to the camera FOV while preserving periodic tiling.
     """
 
     __slots__ = (
@@ -62,6 +66,8 @@ class _FeatureLayout:
         "i_max",
         "j_min",
         "j_max",
+        "offset_x_um",
+        "offset_y_um",
     )
 
     def __init__(
@@ -74,6 +80,8 @@ class _FeatureLayout:
         i_max: int,
         j_min: int,
         j_max: int,
+        offset_x_um: float,
+        offset_y_um: float,
     ) -> None:
         self.pattern_model = pattern_model
         self.pitch_um = float(pitch_um)
@@ -83,6 +91,11 @@ class _FeatureLayout:
         self.i_max = int(i_max)
         self.j_min = int(j_min)
         self.j_max = int(j_max)
+        # Global lattice shift in pattern coordinates (µm). This is applied
+        # uniformly to all nominal feature centers when the layout is built,
+        # so all subsequent geometry queries see the same offset implicitly.
+        self.offset_x_um = float(offset_x_um)
+        self.offset_y_um = float(offset_y_um)
 
 
 # Cache keyed by a simple signature so that all calls in a run share one layout.
@@ -133,8 +146,10 @@ def _compute_lattice_bounds(
     We then compute the min/max lattice indices whose nominal centers fall
     within [-L_um/2 - margin, L_um/2 + margin] in both x and y.
 
-    A small margin of one lattice period is used so that modest jitter cannot
-    produce features that affect the FOV but fall outside the bounds.
+    A small margin of one lattice period is used so that modest jitter and the
+    global lattice offset cannot produce features that affect the FOV but fall
+    outside the bounds. The bounds are computed for an unshifted grid; the
+    global offset is applied later when building feature centers.
     """
     img_size_pixels = int(img_size_pixels)
     pixel_size_nm = float(pixel_size_nm)
@@ -147,8 +162,8 @@ def _compute_lattice_bounds(
         )
 
     L_nm = img_size_pixels * pixel_size_nm
-    # Use oversampling factor to ensure bounds cover the oversampled FOV area.
-    L_um = (L_nm * 1e-3)  # physical FOV is independent of oversampling
+    # Physical FOV is independent of oversampling (os_factor is used elsewhere).
+    L_um = (L_nm * 1e-3)
 
     half_L = 0.5 * L_um
     margin = pitch_um  # one extra lattice period in each direction
@@ -183,14 +198,33 @@ def _build_feature_layout(
 
     The layout is built in pattern coordinates aligned with the FOV, using the
     same centered convention as _generate_gold_hole_pattern / optical maps.
+
+    In addition to local feature randomization, every layout includes a global
+    pattern offset (offset_x_um, offset_y_um) sampled once per layout build.
+    This offset shifts the entire lattice uniformly relative to the camera
+    center while preserving the periodicity of the pattern. The offset is
+    always applied when chip patterns are enabled and is independent of the
+    chip_pattern_randomization_enabled flag (which controls only local
+    imperfections).
     """
     chip_enabled = bool(params.get("chip_pattern_enabled", False))
     if not chip_enabled:
         # Should not normally be called if chip pattern is disabled, but guard
         # against accidental use.
         features_by_cell: Dict[Tuple[int, int], _LatticeFeature] = {}
-        return _FeatureLayout(pattern_model, pitch_um, nominal_radius_um,
-                              features_by_cell, 0, -1, 0, -1)
+        # No offset is meaningful for an empty layout; set to zero.
+        return _FeatureLayout(
+            pattern_model,
+            pitch_um,
+            nominal_radius_um,
+            features_by_cell,
+            0,
+            -1,
+            0,
+            -1,
+            0.0,
+            0.0,
+        )
 
     img_size_pixels = int(params["image_size_pixels"])
     pixel_size_nm = float(params["pixel_size_nm"])
@@ -212,10 +246,19 @@ def _build_feature_layout(
 
     features_by_cell: Dict[Tuple[int, int], _LatticeFeature] = {}
 
+    # Global pattern offset: always applied when a chip pattern is enabled.
+    # We sample offsets uniformly over a single repeat unit in each direction,
+    # [0, pitch_um). This is equivalent to wrapping the pattern relative to
+    # the camera FOV and ensures that each video sees the grid in a different
+    # lateral position while preserving periodic tiling.
+    offset_x_um = float(np.random.uniform(0.0, pitch_um))
+    offset_y_um = float(np.random.uniform(0.0, pitch_um))
+
     for i in range(i_min, i_max + 1):
-        center_x_nominal_um = i * pitch_um
+        # Nominal center for this lattice index, including global offset.
+        center_x_nominal_um = i * pitch_um + offset_x_um
         for j in range(j_min, j_max + 1):
-            center_y_nominal_um = j * pitch_um
+            center_y_nominal_um = j * pitch_um + offset_y_um
 
             if randomization_enabled:
                 # Gaussian jitter in position
@@ -241,7 +284,8 @@ def _build_feature_layout(
 
                 theta_rad = 0.0  # keep axis-aligned ellipses for now
             else:
-                # Ideal periodic circles (original behavior).
+                # Ideal periodic circles, but the entire grid is globally shifted
+                # by (offset_x_um, offset_y_um).
                 center_x_um = center_x_nominal_um
                 center_y_um = center_y_nominal_um
                 r_x_um = nominal_radius_um
@@ -265,6 +309,8 @@ def _build_feature_layout(
         i_max=i_max,
         j_min=j_min,
         j_max=j_max,
+        offset_x_um=offset_x_um,
+        offset_y_um=offset_y_um,
     )
 
 
@@ -278,8 +324,18 @@ def _get_feature_layout_for_params(
     Retrieve (or build and cache) the feature layout corresponding to the
     current chip configuration.
 
-    The cache key uses only values that affect geometry; if any of these
-    change between runs, a new layout is built.
+    The cache key uses only values that affect geometry deterministically for
+    a given simulation run. The global pattern offset is *not* part of the
+    cache key; it is sampled when the layout is first built and stored inside
+    the layout. As long as the cache is not cleared, all callers in the same
+    run see the same offset and the same feature centers.
+
+    Note:
+        The randomness used to build a layout (offset, jitter, shape
+        distortion) is driven by the global NumPy RNG. In the dataset
+        generator, np.random.seed is set per video, so each video gets its own
+        randomized layout (including global offset) in a deterministic way for
+        a given seed.
     """
     chip_enabled = bool(params.get("chip_pattern_enabled", False))
     if not chip_enabled:
@@ -287,7 +343,7 @@ def _get_feature_layout_for_params(
         empty_key = ("none", 0.0, 0.0, 0, 0, 0, 0, 0.0, 1.0)
         layout = _LAYOUT_CACHE.get(empty_key)
         if layout is None:
-            layout = _FeatureLayout("none", 1.0, 0.0, {}, 0, -1, 0, -1)
+            layout = _FeatureLayout("none", 1.0, 0.0, {}, 0, -1, 0, -1, 0.0, 0.0)
             _LAYOUT_CACHE[empty_key] = layout
         return layout
 
@@ -334,20 +390,25 @@ def _classify_point_against_layout(
     Returns:
         inside_feature (bool): True if the point lies inside any feature
         (hole OR pillar, depending on pattern semantics).
+
+    The global pattern offset is already baked into the feature centers stored
+    in the layout. This function assumes x_um, y_um are in the same centered
+    pattern coordinates as used for optical maps and trajectories.
     """
     pitch_um = layout.pitch_um
     if pitch_um <= 0.0 or not layout.features_by_cell:
         return False
 
     # Approximate lattice indices of the nearest feature in the ideal grid.
+    # Because the layout was built from integer indices (i, j) with a uniform
+    # global offset, x_um / pitch_um is still close to the underlying index
+    # even after the shift. The small 3x3 neighborhood is sufficient as long
+    # as the jitter remains modest relative to the pitch.
     i0 = int(round(x_um / pitch_um))
     j0 = int(round(y_um / pitch_um))
 
     inside = False
 
-    # Check small neighborhood around (i0, j0) because jitter prevents exact
-    # alignment with the ideal grid. 3x3 neighborhood is sufficient for modest
-    # jitter.
     for di in (-1, 0, 1):
         i = i0 + di
         if i < layout.i_min or i > layout.i_max:
@@ -453,13 +514,15 @@ def _generate_gold_hole_pattern(
 
     Updated behavior:
         - When a PARAMS dictionary is provided, the function uses the shared
-          feature layout (with possible randomization) so that the optical
-          pattern geometry is identical to the Brownian exclusion geometry.
+          feature layout (with possible randomization and a global lattice
+          offset) so that the optical pattern geometry is identical to the
+          Brownian exclusion geometry.
         - When params is None, the function falls back to the original ideal
           circular, perfectly periodic pattern for backward compatibility in
           isolated uses.
 
-    See previous docstring for detailed geometry description.
+    The global offset is applied when the layout is built and is invisible to
+    callers of this function; here we only query the layout.
     """
     height, width = int(shape[0]), int(shape[1])
 
@@ -514,7 +577,7 @@ def _generate_gold_hole_pattern(
         hole_mask = r_um <= radius_um
         pattern[hole_mask] = hole_intensity_factor
     else:
-        # Use shared feature layout.
+        # Use shared feature layout, which includes the global lattice offset.
         layout = _get_feature_layout_for_params(
             params=params,
             pattern_model="gold_holes_v1",
@@ -524,11 +587,9 @@ def _generate_gold_hole_pattern(
 
         pattern = np.full((height, width), gold_intensity_factor, dtype=float)
 
-        # Vectorized classification: compute classification per pixel using
-        # small local neighborhoods on the lattice.
-        # For performance and clarity we loop over rows and use broadcasted calls
-        # into the classifier for each pixel; the 3x3 neighborhood keeps cost
-        # bounded.
+        # Per-pixel classification using the layout. The layout stores feature
+        # centers already shifted by the global offset, so X_um/Y_um can remain
+        # in the standard centered FOV coordinates.
         for iy in range(height):
             for ix in range(width):
                 inside_hole = _classify_point_against_layout(
@@ -561,7 +622,7 @@ def _generate_nanopillar_pattern(
     Updated behavior:
         - When a PARAMS dictionary is provided, the same shared feature layout
           used for Brownian dynamics is used here, so the optical pattern
-          matches the exclusion geometry.
+          (including the global lattice offset) matches the exclusion geometry.
         - When params is None, falls back to the original ideal periodic
           circular pattern via the gold-hole helper.
     """
@@ -707,9 +768,16 @@ def _map_position_nm_to_gold_hole_unit_cell(
     pitch_um: float,
 ) -> tuple:
     """
-    (Kept for backward-compatibility; now only used to convert to centered
-    pattern coordinates and to recover img_size_nm. Radius-based classification
-    has been replaced by feature-layout-based classification.)
+    Convert a lateral position (x_nm, y_nm) in world coordinates to centered
+    pattern coordinates (x_um, y_um) and return additional unit-cell helpers.
+
+    This function retains the modulo-based unit-cell computations for backward
+    compatibility but current classification and projection routines use only
+    x_um and y_um together with the feature layout (which already includes the
+    global pattern offset).
+
+    Returns:
+        dx_um, dy_um, r_um, x_um, y_um, img_size_nm
     """
     img_size_pixels = int(params["image_size_pixels"])
     pixel_size_nm = float(params["pixel_size_nm"])
@@ -741,8 +809,9 @@ def is_position_in_chip_solid(params: dict, x_nm: float, y_nm: float) -> bool:
     of the configured chip/substrate pattern.
 
     Updated behavior:
-        - Uses the shared feature layout with imperfections when available,
-          ensuring the geometry matches the optical chip pattern.
+        - Uses the shared feature layout with imperfections and a per-layout
+          global lattice offset, ensuring the geometry matches the optical chip
+          pattern.
         - Gold holes:
             solid = gold film (outside holes).
         - Nanopillars:
@@ -818,7 +887,8 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
     solid region.
 
     Updated behavior:
-        - Uses the same feature layout (with imperfections) as the classifier.
+        - Uses the same feature layout (with imperfections and global offset) as
+          the classifier.
         - Gold holes:
             solid -> gold film. We move the point into the nearest hole
             interior by projecting toward the nearest feature's center and
@@ -851,7 +921,7 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
         pitch_um = geom["pitch_um"]
         nominal_radius_um = geom["radius_um"]
 
-        dx_um_cell, dy_um_cell, _, x_um, y_um, img_size_nm = _map_position_nm_to_gold_hole_unit_cell(
+        _, _, _, x_um, y_um, img_size_nm = _map_position_nm_to_gold_hole_unit_cell(
             params, x_nm, y_nm, pitch_um
         )
 
@@ -909,7 +979,7 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
         pitch_um = geom["pitch_um"]
         nominal_radius_um = geom["radius_um"]
 
-        dx_um_cell, dy_um_cell, _, x_um, y_um, img_size_nm = _map_position_nm_to_gold_hole_unit_cell(
+        _, _, _, x_um, y_um, img_size_nm = _map_position_nm_to_gold_hole_unit_cell(
             params, x_nm, y_nm, pitch_um
         )
 
@@ -975,9 +1045,9 @@ def generate_reference_and_background_maps(
     Updated behavior:
         - When a chip pattern is enabled, the gold-hole and nanopillar pattern
           generators use the same randomized feature layout that drives
-          is_position_in_chip_solid / project_position_to_fluid_region, so
-          optical backgrounds and Brownian exclusion are geometrically
-          consistent, including imperfections.
+          is_position_in_chip_solid / project_position_to_fluid_region, including
+          a per-layout global lattice offset. Optical backgrounds and Brownian
+          exclusion are therefore geometrically consistent.
     """
     E_ref_amplitude = float(params["reference_field_amplitude"])
     background_intensity = float(params["background_intensity"])
