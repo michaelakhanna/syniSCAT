@@ -77,8 +77,6 @@ def estimate_psf_padding_radius_pixels(params):
             "PARAMS['psf_oversampling_factor'] must all be positive."
         )
 
-    # If the optical parameters are degenerate, no meaningful Airy model exists.
-    # In that case, fall back to zero padding.
     if NA <= 0.0 or wavelength_nm <= 0.0 or n_medium <= 0.0:
         return 0
 
@@ -88,44 +86,30 @@ def estimate_psf_padding_radius_pixels(params):
             "PARAMS['psf_intensity_fraction_threshold'] must be in the open interval (0, 1)."
         )
 
-    # Wavelength inside the medium in nanometers.
     wavelength_medium_nm = wavelength_nm / n_medium
 
-    # Dimensionless radial coordinate rho = (NA * r) / lambda_medium.
-    # We sample rho over a generous range so that multiple Airy rings are covered.
     rho_max = 50.0
     num_samples = 20000
     rho = np.linspace(1e-4, rho_max, num_samples)
     x = np.pi * rho
 
-    # Airy pattern intensity normalized to the on-axis value (I(0) = 1 in this model).
     I_rel = (2.0 * j1(x) / x) ** 2
 
-    # We want to keep all radii where the intensity is at least `threshold`.
-    # The outermost such radius defines the padding.
     indices_above = np.where(I_rel >= threshold)[0]
     if indices_above.size == 0:
         rho_crit = 0.0
     else:
         rho_crit = float(rho[indices_above[-1]])
 
-    # Convert the critical rho into a physical radius in nanometers:
-    #   rho = NA * r / lambda_medium  =>  r = rho * lambda_medium / NA
     radius_nm = rho_crit * wavelength_medium_nm / NA
 
-    # Do not let the padding radius exceed half the physical field of view.
     psf_size_nm = img_size * pixel_size_nm
     max_radius_nm = 0.5 * psf_size_nm
     radius_nm = min(radius_nm, max_radius_nm)
 
-    # Convert to oversampled pixels. The oversampled pixel size in nm is:
-    #   pixel_size_nm / os_factor
     radius_pixels_oversampled = radius_nm / pixel_size_nm * os_factor
 
-    # Add a one-pixel safety margin to account for discretization.
     padding_pixels = int(np.ceil(radius_pixels_oversampled)) + 1
-
-    # Ensure non-negative.
     return max(padding_pixels, 0)
 
 
@@ -148,27 +132,22 @@ def _accumulate_psf_on_canvas(canvas, psf, center_x, center_y):
     H, W = canvas.shape
     kh, kw = psf.shape
 
-    # Kernel center indices in its own coordinate system.
     kc_y = kh // 2
     kc_x = kw // 2
 
-    # Intended bounds of the kernel on the canvas.
     x0 = center_x - kc_x
     y0 = center_y - kc_y
     x1 = x0 + kw
     y1 = y0 + kh
 
-    # Clip the bounds to the canvas extent.
     x0_c = max(0, x0)
     y0_c = max(0, y0)
     x1_c = min(W, x1)
     y1_c = min(H, y1)
 
-    # If there is no overlap, nothing to do.
     if x0_c >= x1_c or y0_c >= y1_c:
         return
 
-    # Corresponding region in the PSF kernel.
     kx0 = x0_c - x0
     ky0 = y0_c - y0
     kx1 = kx0 + (x1_c - x0_c)
@@ -177,17 +156,9 @@ def _accumulate_psf_on_canvas(canvas, psf, center_x, center_y):
     canvas[y0_c:y1_c, x0_c:x1_c] += psf[ky0:ky1, kx0:kx1]
 
 
-# ---------------------------------------------------------------------------
-# Orientation interpolation helpers (quaternions and slerp)
-# ---------------------------------------------------------------------------
-
 def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
     """
     Convert a 3x3 rotation matrix to a unit quaternion [w, x, y, z].
-
-    This helper uses a standard numerically stable branch-based algorithm.
-    It assumes R is a proper rotation (orthonormal, det ~ 1), as produced by
-    simulate_orientations. The output is always normalized.
     """
     R = np.asarray(R, dtype=float)
     if R.shape != (3, 3):
@@ -223,7 +194,6 @@ def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
     q = np.array([w, x, y, z], dtype=float)
     norm = np.linalg.norm(q)
     if norm == 0.0:
-        # Pathological case; fall back to identity.
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
     return q / norm
 
@@ -231,8 +201,6 @@ def _rotation_matrix_to_quaternion(R: np.ndarray) -> np.ndarray:
 def _quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
     """
     Convert a unit quaternion [w, x, y, z] to a 3x3 rotation matrix.
-
-    Input is normalized internally to guard against numerical drift.
     """
     q = np.asarray(q, dtype=float)
     if q.shape != (4,):
@@ -274,24 +242,17 @@ def _quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
 def _slerp_quaternions(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
     """
     Spherical linear interpolation (slerp) between two unit quaternions.
-
-    q(t) = slerp(q0, q1; t), where t in [0, 1].
-
-    The interpolation follows the shortest path on the 4D unit sphere by
-    flipping q1 if necessary to ensure the dot product is non-negative.
     """
     q0 = np.asarray(q0, dtype=float)
     q1 = np.asarray(q1, dtype=float)
     if q0.shape != (4,) or q1.shape != (4,):
         raise ValueError("Quaternions must have shape (4,) as [w, x, y, z].")
 
-    # Normalize inputs.
     q0 = q0 / (np.linalg.norm(q0) or 1.0)
     q1 = q1 / (np.linalg.norm(q1) or 1.0)
 
     dot = float(np.dot(q0, q1))
 
-    # Take the shortest path: if dot < 0, negate q1.
     if dot < 0.0:
         q1 = -q1
         dot = -dot
@@ -299,7 +260,6 @@ def _slerp_quaternions(q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
     dot = min(max(dot, -1.0), 1.0)
 
     if dot > 0.9995:
-        # Nearly identical; use linear interpolation and renormalize.
         q = (1.0 - t) * q0 + t * q1
         return q / (np.linalg.norm(q) or 1.0)
 
@@ -321,22 +281,6 @@ def _interpolate_orientation_for_instance(
 ) -> np.ndarray | None:
     """
     Interpolate the orientation of a particle instance at a fractional frame index.
-
-    This helper converts discrete per-frame orientations into a continuous
-    orientation in time that is consistent with the translational interpolation
-    used for motion blur.
-
-    Args:
-        instance (ParticleInstance): The particle for which to compute orientation.
-        time_index_float (float): Fractional frame index, e.g., 3.25 means
-            25% of the way between discrete frames 3 and 4.
-
-    Returns:
-        np.ndarray | None:
-            - 3x3 rotation matrix for the interpolated orientation if
-              instance.orientation_matrices is defined.
-            - None if the instance has no orientation_matrices (spherical
-              particle or rotational diffusion disabled).
     """
     orientations = instance.orientation_matrices
     if orientations is None:
@@ -346,7 +290,6 @@ def _interpolate_orientation_for_instance(
     if num_frames == 0:
         return None
 
-    # Clamp the time index into the valid range [0, num_frames - 1].
     t = float(time_index_float)
     if t <= 0.0:
         return orientations[0]
@@ -363,16 +306,11 @@ def _interpolate_orientation_for_instance(
     R0 = orientations[t_floor]
     R1 = orientations[t_ceil]
 
-    # Convert to quaternions, interpolate, and convert back to a rotation matrix.
     q0 = _rotation_matrix_to_quaternion(R0)
     q1 = _rotation_matrix_to_quaternion(R1)
     q_interp = _slerp_quaternions(q0, q1, alpha)
     return _quaternion_to_rotation_matrix(q_interp)
 
-
-# ---------------------------------------------------------------------------
-# Sub-particle placement helper
-# ---------------------------------------------------------------------------
 
 def _iter_subparticle_render_info(
     instance: ParticleInstance,
@@ -382,43 +320,9 @@ def _iter_subparticle_render_info(
     """
     Compute the list of sub-particle render instructions for a given particle
     instance at a given (possibly interpolated) position and orientation.
-
-    Each returned tuple has the form:
-        (world_position_nm, ipsf_interpolator, local_signal_multiplier)
-
-    where:
-        - world_position_nm: 3D coordinates [x, y, z] in nm for this sub-particle.
-        - ipsf_interpolator: spherical IPSFZInterpolator to use for this sub-particle.
-        - local_signal_multiplier: multiplicative factor applied to the
-          scattered field from this sub-particle, on top of the parent
-          ParticleInstance.signal_multiplier.
-
-    Spherical behavior (default):
-        - When instance.particle_type.is_composite is False or
-          particle_type.sub_particles is empty, this helper returns a single
-          entry corresponding to the particle's own iPSF at base_position_nm
-          with local_signal_multiplier=1.0. Orientation is ignored because
-          the PSF is radially symmetric.
-
-    Composite behavior:
-        - When instance.particle_type.is_composite == True and sub_particles
-          are defined:
-            * If orientation_matrix is not None, it is treated as the body-to-
-              lab rotation matrix at the current time. It is applied to each
-              SubParticle.offset_nm to obtain a rotated offset in world
-              coordinates.
-            * If orientation_matrix is None, offsets are treated as already
-              expressed in world coordinates (no rotation).
-            * The rotated (or raw) offset is added to base_position_nm to
-              obtain the world position for each sub-particle.
-
-    This function is intentionally stateless with respect to the frame index;
-    the caller is responsible for supplying any time-dependent orientation.
     """
     ptype: ParticleType = instance.particle_type
 
-    # Spherical case: no internal geometry; treat the whole particle as one
-    # sub-particle at the base_position_nm using the type-level interpolator.
     if not ptype.is_composite or not ptype.sub_particles:
         return [
             (
@@ -428,7 +332,6 @@ def _iter_subparticle_render_info(
             )
         ]
 
-    # Composite case.
     base_world_pos = np.asarray(base_position_nm, dtype=float)
     if base_world_pos.shape != (3,):
         raise ValueError(
@@ -468,57 +371,25 @@ def _iter_subparticle_render_info(
     return sub_infos
 
 
-# ---------------------------------------------------------------------------
-# Main rendering function
-# ---------------------------------------------------------------------------
-
 def generate_video_and_masks(params: dict, particle_instances: list[ParticleInstance]):
     """
     Generate all video frames and segmentation masks by placing particles
     according to their trajectories and applying the appropriate iPSF. Includes
     motion blur.
 
-    This implementation renders each frame on an oversampled, padded canvas that
-    is larger than the final field of view. Each particle's PSF (for spherical
-    particles) or set of sub-particle PSFs (for composite particles) is
-    added directly to this canvas at its physical location using explicit
-    clipping at the canvas boundaries (non-periodic placement). The padding
-    width is chosen so that any truncation of the PSF occurs only where its
-    intensity is negligible in the central region that is ultimately cropped
-    and used for the video.
+    The mask generation step uses a PSF-based central-lobe definition:
 
-    The stationary reference field and background intensity are represented as
-    2D maps generated by `chip_pattern.generate_reference_and_background_maps`.
-    The base maps are time-independent; when a time-dependent chip pattern
-    contrast model is selected (e.g., "time_dependent_v1"), the dimensionless
-    pattern is reconstructed from these base maps and modulated per-frame using
-    `compute_contrast_scale_for_frame`. When the contrast model is "static",
-    the behavior is identical to the original implementation.
+        - For each particle and frame, a particle-specific, noise-free contrast
+          image (from the iPSF and reference field) is computed at the final
+          resolution.
+        - The mask is defined as all pixels within the central lobe, where
+          the ring-averaged contrast keeps the same sign as at the particle
+          center; the boundary is at the first sign flip or a small-amplitude
+          fallback.
 
-    The temporal sampling used for motion blur within each frame is controlled
-    by PARAMS["exposure_time_ms"]. For a given frame at index f:
-        - The frame interval is 1 / fps.
-        - The exposure window is a contiguous interval of length
-          exposure_time_ms (converted to seconds) centered on the frame's
-          midpoint time.
-        - Particle positions for motion blur are sampled uniformly over this
-          exposure window and interpolated between the stored trajectory
-          positions at integer frame times.
-        - For particles with orientation_matrices, orientations are
-          interpolated in time (via quaternion slerp) so that translational
-          and rotational motion are sampled at the same sub-frame times.
-
-    This function uses ParticleInstance objects as the single source of truth
-    for per-particle state (trajectory, iPSF interpolator, amplitude, and
-    optional orientation). The helper _iter_subparticle_render_info encapsulates
-    the logic for handling both spherical and composite particles so that
-    future changes to composite geometry or rotational dynamics do not require
-    changes to the rest of the rendering pipeline.
-
-    For the current spherical-only setup (default PARAMS), the observable
-    behavior and outputs remain unchanged.
+    Trackability still operates on the same contrast images and gating logic as
+    before; only the internal mask geometry has been changed.
     """
-    # --- Basic timing parameters ---
     fps = float(params["fps"])
     duration_seconds = float(params["duration_seconds"])
     num_frames = int(fps * duration_seconds)
@@ -530,9 +401,6 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
 
     frame_interval_s = 1.0 / fps
 
-    # Exposure time in seconds for motion blur integration. If the parameter is
-    # omitted, assume a full-frame exposure so that behavior matches the
-    # original implementation.
     exposure_time_ms = float(params.get("exposure_time_ms", 1000.0 * frame_interval_s))
     exposure_time_s = exposure_time_ms / 1000.0
 
@@ -544,10 +412,8 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
             "so that the exposure window is contained within a single frame interval."
         )
 
-    # Number of particles is defined by the number of ParticleInstance objects.
     num_particles = len(particle_instances)
     if num_particles != int(params["num_particles"]):
-        # Keep a strict consistency check so that misconfigurations are caught early.
         raise ValueError(
             "Number of ParticleInstance objects (%d) does not match "
             "PARAMS['num_particles'] (%d)." % (num_particles, int(params["num_particles"]))
@@ -559,13 +425,11 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
     final_size = (img_size, img_size)
     os_size = img_size * os_factor
 
-    # --- Determine PSF padding to avoid truncation of relevant PSF energy ---
     psf_padding_radius = estimate_psf_padding_radius_pixels(params)
     os_canvas_size = os_size + 2 * psf_padding_radius
     crop_start = psf_padding_radius
     crop_end = crop_start + os_size
 
-    # --- Precompute oversampled radius grid for radial PSF upsampling ---
     if os_factor > 1:
         yy_os, xx_os = np.indices((os_size, os_size))
         center_os = os_size // 2
@@ -574,7 +438,6 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
     else:
         r_os_flat = None
 
-    # --- Stationary reference field and background maps (base) ---
     fov_shape_os = (os_size, os_size)
     E_ref_os_base, E_ref_final_base, background_final_base = generate_reference_and_background_maps(
         params,
@@ -613,8 +476,6 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
         else:
             pattern_final_base = np.ones_like(background_final_base, dtype=float)
 
-        # Normalize patterns to unit mean so that the global brightness is
-        # controlled solely by background_intensity.
         mean_os = float(pattern_os_base.mean())
         if mean_os > 0.0:
             pattern_os_base /= mean_os
@@ -623,12 +484,11 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
         if mean_final > 0.0:
             pattern_final_base /= mean_final
 
-    # --- Bit depth and camera count handling ---
     bit_depth = params["bit_depth"]
     if not isinstance(bit_depth, int) or bit_depth <= 0:
         raise ValueError("PARAMS['bit_depth'] must be a positive integer.")
 
-    max_supported_bit_depth = 16  # Limited by uint16 storage in this implementation.
+    max_supported_bit_depth = 16
     if bit_depth > max_supported_bit_depth:
         raise ValueError(
             f"PARAMS['bit_depth']={bit_depth} exceeds the maximum supported bit depth "
@@ -647,11 +507,8 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
     all_signal_frames = []
     all_reference_frames = []
 
-    # Trackability gating master switch: when False, the model must not gate
-    # masks or stop video early.
     trackability_enabled = bool(params.get("trackability_enabled", True))
 
-    # Initialize the human trackability confidence model if masks are enabled.
     if params["mask_generation_enabled"]:
         trackability_model = TrackabilityModel(params, num_particles)
         trackability_threshold = params.get("trackability_confidence_threshold", 0.8)
@@ -665,7 +522,6 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
 
     print("Generating video frames and masks...")
     for f in tqdm(range(num_frames)):
-        # --- Per-frame reference field and background maps ---
         if use_dynamic_contrast:
             alpha_f = compute_contrast_scale_for_frame(params, f, num_frames)
 
@@ -686,21 +542,16 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
             E_ref_intensity_final = E_ref_intensity_final_base
             background_final = background_final_base
 
-        # Accumulators for the motion-blurred electric field of each particle,
-        # defined on the padded oversampled canvas.
         blurred_particle_fields = [
             np.zeros((os_canvas_size, os_canvas_size), dtype=np.complex128)
             for _ in range(num_particles)
         ]
 
-        # --- Subsample rendering for motion blur ---
         for s in range(num_subsamples):
             frame_center_time = (f + 0.5) * frame_interval_s
             start_time = frame_center_time - 0.5 * exposure_time_s
             current_time = start_time + (s + 0.5) * sub_dt
 
-            # normalized_time is a fractional frame index measured in frame intervals:
-            # 0.0 at the first frame center, 1.0 at the second, etc.
             normalized_time = current_time / frame_interval_s
             time_index_float = normalized_time
 
@@ -716,11 +567,8 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                 frame_idx_ceil = frame_idx_floor + 1
                 interp_factor = normalized_time - frame_idx_floor
 
-            # Interpolate positions and orientations for each particle instance
-            # between discrete trajectory/orientation samples at integer frame
-            # indices.
             for i, instance in enumerate(particle_instances):
-                traj = instance.trajectory_nm  # shape (num_frames, 3)
+                traj = instance.trajectory_nm
                 if traj.shape[0] != num_frames or traj.shape[1] != 3:
                     raise ValueError(
                         "ParticleInstance %d has trajectory shape %s, expected (%d, 3)."
@@ -731,17 +579,11 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                 pos_ceil = traj[frame_idx_ceil]
                 current_pos_nm = (1.0 - interp_factor) * pos_floor + interp_factor * pos_ceil
 
-                # Orientation interpolation is handled by a dedicated helper so
-                # that rotational motion is sampled at the same sub-frame times
-                # as translational motion.
                 orientation_matrix = _interpolate_orientation_for_instance(
                     instance=instance,
                     time_index_float=time_index_float,
                 )
 
-                # For spherical particles, this yields a single entry; for
-                # composite types, it may yield multiple sub-particles with
-                # rotated offsets.
                 sub_infos = _iter_subparticle_render_info(
                     instance=instance,
                     base_position_nm=current_pos_nm,
@@ -751,10 +593,8 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                 for world_pos_nm, sub_interp, local_multiplier in sub_infos:
                     px, py, pz = world_pos_nm
 
-                    # Get the pre-computed scattered field (iPSF) for the sub-particle's z-position.
                     E_sca_2D = sub_interp([pz])[0]
 
-                    # Upscale to the oversampled resolution for higher accuracy placement.
                     if os_factor > 1:
                         pupil_samples = E_sca_2D.shape[0]
                         center_psf = pupil_samples // 2
@@ -762,7 +602,6 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                         max_bin_psf = E_radial_line.size - 1
 
                         if max_bin_psf > 0:
-                            # Define physical coordinate systems for both source and target grids.
                             nm_per_pixel_psf = (
                                 img_size * pixel_size_nm
                             ) / (os_factor * pupil_samples)
@@ -787,16 +626,12 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                     else:
                         E_sca_2D_rescaled = E_sca_2D
 
-                    # --- Position the PSF on the padded oversampled canvas using explicit clipping ---
                     center_x_px = int(round(px / pixel_size_nm * os_factor))
                     center_y_px = int(round(py / pixel_size_nm * os_factor))
 
                     center_x_canvas = crop_start + center_x_px
                     center_y_canvas = crop_start + center_y_px
 
-                    # Scale the PSF by the per-particle amplitude multiplier
-                    # and the local sub-particle multiplier, and accumulate it
-                    # non-periodically onto the particle's canvas.
                     psf_scaled = (
                         E_sca_2D_rescaled
                         * instance.signal_multiplier
@@ -809,11 +644,9 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                         center_y_canvas,
                     )
 
-        # Average the fields from all subsamples to create the final motion-blurred field.
         for i in range(num_particles):
             blurred_particle_fields[i] /= num_subsamples
 
-        # --- Mask Generation for this Frame ---
         if params["mask_generation_enabled"]:
             for i, instance in enumerate(particle_instances):
                 if trackability_enabled and trackability_model.is_particle_lost(i):
@@ -824,24 +657,17 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                     crop_start:crop_end, crop_start:crop_end
                 ]
 
-                # Raw optical contrast (intensity difference relative to E_ref_intensity_os).
                 contrast_os = (
                     np.abs(E_ref_os + E_sca_particle_blurred_fov) ** 2
                     - E_ref_intensity_os
                 )
-                # Downsample to the final image resolution.
                 contrast_final = cv2.resize(
                     contrast_os, final_size, interpolation=cv2.INTER_AREA
                 )
 
-                # Normalize contrast into units consistent with the trackability
-                # noise model.
                 contrast_final_normalized = contrast_final / (E_ref_amplitude ** 2)
 
                 if trackability_enabled:
-                    # The trackability model uses the true simulated position at
-                    # this integer frame index as context. We pass the stored
-                    # trajectory sample for frame f.
                     position_nm = instance.trajectory_nm[f, :]
                     confidence = trackability_model.update_and_compute_confidence(
                         particle_index=i,
@@ -851,23 +677,31 @@ def generate_video_and_masks(params: dict, particle_instances: list[ParticleInst
                     )
 
                     if confidence >= trackability_threshold:
+                        # Use the *current* physical position to define the mask
+                        # center in final image pixels, consistent with the
+                        # trajectory mapping and iPSF placement.
+                        center_nm = (float(position_nm[0]), float(position_nm[1]))
                         generate_and_save_mask_for_particle(
                             contrast_image=contrast_final_normalized,
                             params=params,
                             particle_index=i,
                             frame_index=f,
+                            center_nm=center_nm,
                         )
                     else:
                         trackability_model.lost[i] = True
                 else:
+                    # Trackability disabled: generate masks for all particles.
+                    pos_nm = instance.trajectory_nm[f, :]
+                    center_nm = (float(pos_nm[0]), float(pos_nm[1]))
                     generate_and_save_mask_for_particle(
                         contrast_image=contrast_final_normalized,
                         params=params,
                         particle_index=i,
                         frame_index=f,
+                        center_nm=center_nm,
                     )
 
-        # --- Final Video Frame Generation ---
         E_sca_total_canvas = np.sum(blurred_particle_fields, axis=0)
         E_sca_total_fov = E_sca_total_canvas[crop_start:crop_end, crop_start:crop_end]
 
