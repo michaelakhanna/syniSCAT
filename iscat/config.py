@@ -366,7 +366,7 @@ PARAMS = {
     # Recommended defaults:
     #   - Values in the range 0.05–0.10 (5–10%) produce visually apparent but
     #     still physically plausible edge irregularities for nanoholes.
-    "chip_pattern_edge_perturbation_max_rel_radius": 0.10,
+    "chip_pattern_edge_perturbation_max_rel_radius": 0.11,
 
     # Number of angular modes used in the edge perturbation series δ(θ).
     #
