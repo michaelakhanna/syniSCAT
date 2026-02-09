@@ -330,6 +330,65 @@ PARAMS = {
     #   r_y = nominal_radius * (1 + delta_y)
     # with delta_x, delta_y ~ Uniform(-distortion_frac, distortion_frac).
     "chip_pattern_shape_regularity": 0.73,
+
+    # --- EDGE PERTURBATION MODEL FOR CHIP FEATURES ---
+    # Maximum relative radial deviation for per-hole edge perturbations.
+    #
+    # Semantics:
+    #   - This parameter controls the strength of local boundary roughness for
+    #     individual features (currently applied to the nanohole array
+    #     'gold_holes_v1').
+    #   - The perturbation is expressed as a fractional deviation δ(θ) of the
+    #     baseline radius as a function of angle θ, so that:
+    #
+    #         r_boundary(θ) = r_baseline(θ) * (1 + δ(θ))
+    #
+    #   - The internal sampling strategy ensures that, in typical cases,
+    #     |δ(θ)| <= chip_pattern_edge_perturbation_max_rel_radius across all
+    #     angles, so the perturbed radius remains within a modest band around
+    #     the underlying circle/ellipse.
+    #
+    # Interaction with chip_pattern_shape_regularity:
+    #   - The effective amplitude used per layout is:
+    #
+    #         effective_amp = chip_pattern_edge_perturbation_max_rel_radius
+    #                         * (1 - chip_pattern_shape_regularity)
+    #
+    #     so that:
+    #       * chip_pattern_shape_regularity = 1.0 -> perfectly smooth edges
+    #         (no edge perturbation regardless of this max parameter).
+    #       * chip_pattern_shape_regularity = 0.0 -> full amplitude.
+    #
+    # Backward compatibility:
+    #   - Setting this parameter to 0.0 disables edge perturbations entirely
+    #     and recovers smooth circular/elliptical boundaries.
+    #
+    # Recommended defaults:
+    #   - Values in the range 0.05–0.10 (5–10%) produce visually apparent but
+    #     still physically plausible edge irregularities for nanoholes.
+    "chip_pattern_edge_perturbation_max_rel_radius": 0.08,
+
+    # Number of angular modes used in the edge perturbation series δ(θ).
+    #
+    # Semantics:
+    #   - δ(θ) is represented as a short cosine series:
+    #
+    #         δ(θ) = Σ_{k=1..K} A_k * cos(k θ + φ_k)
+    #
+    #     where K = chip_pattern_edge_perturbation_mode_count.
+    #   - Each feature gets its own random set of coefficients {A_k, φ_k},
+    #     sampled once per layout build using the same NumPy RNG as the rest
+    #     of the geometry randomization.
+    #
+    # Performance:
+    #   - K is kept small (default 3) so that classification and projection
+    #     cost per point remains modest. For each candidate feature, a handful
+    #     of cosine evaluations are added to the existing ellipse logic.
+    #
+    # Backward compatibility:
+    #   - If this is set to 0, the edge perturbation model is disabled even if
+    #     chip_pattern_edge_perturbation_max_rel_radius is non-zero.
+    "chip_pattern_edge_perturbation_mode_count": 3,
 }
 
 # --- PHYSICAL CONSTANTS ---

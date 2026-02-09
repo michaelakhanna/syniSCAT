@@ -18,8 +18,26 @@ class _LatticeFeature:
         r_y_um (float): Semi-axis length along feature's local y-axis (µm).
         theta_rad (float): Orientation of the ellipse in radians. For now we
             use axis-aligned ellipses and set theta_rad = 0.0.
+        edge_perturbation_enabled (bool): Whether per-feature edge perturbation
+            should be applied when computing the boundary radius.
+        edge_modes (Optional[np.ndarray]): 1D array of integer mode indices k
+            used in the angular perturbation series δ(θ).
+        edge_amp (Optional[np.ndarray]): 1D array of float amplitudes A_k
+            (dimensionless, relative to baseline radius).
+        edge_phase (Optional[np.ndarray]): 1D array of float phase offsets φ_k
+            in radians.
     """
-    __slots__ = ("center_x_um", "center_y_um", "r_x_um", "r_y_um", "theta_rad")
+    __slots__ = (
+        "center_x_um",
+        "center_y_um",
+        "r_x_um",
+        "r_y_um",
+        "theta_rad",
+        "edge_perturbation_enabled",
+        "edge_modes",
+        "edge_amp",
+        "edge_phase",
+    )
 
     def __init__(
         self,
@@ -28,12 +46,20 @@ class _LatticeFeature:
         r_x_um: float,
         r_y_um: float,
         theta_rad: float = 0.0,
+        edge_perturbation_enabled: bool = False,
+        edge_modes: Optional[np.ndarray] = None,
+        edge_amp: Optional[np.ndarray] = None,
+        edge_phase: Optional[np.ndarray] = None,
     ) -> None:
         self.center_x_um = float(center_x_um)
         self.center_y_um = float(center_y_um)
         self.r_x_um = float(r_x_um)
         self.r_y_um = float(r_y_um)
         self.theta_rad = float(theta_rad)
+        self.edge_perturbation_enabled = bool(edge_perturbation_enabled)
+        self.edge_modes = edge_modes
+        self.edge_amp = edge_amp
+        self.edge_phase = edge_phase
 
 
 class _FeatureLayout:
@@ -129,6 +155,29 @@ def _get_randomization_settings(params: dict) -> Tuple[bool, float, float]:
     return enabled, jitter_um, shape_reg
 
 
+def _get_edge_perturbation_settings(params: dict) -> Tuple[float, int]:
+    """
+    Extract and validate global edge perturbation settings for chip features.
+
+    Returns:
+        max_rel_radius (float): Maximum relative radial deviation (delta_max).
+        mode_count (int): Number of angular modes K used in the perturbation.
+    """
+    max_rel = float(params.get("chip_pattern_edge_perturbation_max_rel_radius", 0.0))
+    mode_count = int(params.get("chip_pattern_edge_perturbation_mode_count", 0))
+
+    if max_rel < 0.0:
+        raise ValueError(
+            "PARAMS['chip_pattern_edge_perturbation_max_rel_radius'] must be non-negative."
+        )
+    if mode_count < 0:
+        raise ValueError(
+            "PARAMS['chip_pattern_edge_perturbation_mode_count'] must be non-negative."
+        )
+
+    return max_rel, mode_count
+
+
 def _compute_lattice_bounds(
     img_size_pixels: int,
     pixel_size_nm: float,
@@ -181,6 +230,48 @@ def _compute_lattice_bounds(
     return i_min, i_max, j_min, j_max
 
 
+def _sample_edge_perturbation_coefficients(
+    effective_amp_rel_max: float,
+    mode_count: int,
+) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    """
+    Sample per-feature edge perturbation coefficients for the angular series:
+
+        δ(θ) = Σ_k A_k * cos(k θ + φ_k)
+
+    The amplitudes A_k are drawn so that the sum of their absolute values is
+    bounded by effective_amp_rel_max, ensuring that the perturbed radius stays
+    within [1 - effective_amp_rel_max, 1 + effective_amp_rel_max] times the
+    baseline radius in typical cases.
+
+    Returns:
+        enabled (bool): Whether perturbation is active (effective_amp_rel_max > 0 and mode_count > 0).
+        modes (Optional[np.ndarray]): Integer mode indices k.
+        amp (Optional[np.ndarray]): Amplitudes A_k (float32).
+        phase (Optional[np.ndarray]): Phases φ_k in radians (float32).
+    """
+    if effective_amp_rel_max <= 0.0 or mode_count <= 0:
+        return False, None, None, None
+
+    # Simple strategy: distribute amplitude budget evenly across modes so that
+    # sum(|A_k|) <= effective_amp_rel_max. We still randomize signs.
+    per_mode_max = effective_amp_rel_max / float(mode_count)
+
+    modes = np.arange(1, mode_count + 1, dtype=np.int16)
+    amp = np.random.uniform(
+        low=-per_mode_max,
+        high=per_mode_max,
+        size=mode_count,
+    ).astype(np.float32)
+    phase = np.random.uniform(
+        low=0.0,
+        high=2.0 * math.pi,
+        size=mode_count,
+    ).astype(np.float32)
+
+    return True, modes, amp, phase
+
+
 def _build_feature_layout(
     params: dict,
     pattern_model: str,
@@ -206,6 +297,11 @@ def _build_feature_layout(
     always applied when chip patterns are enabled and is independent of the
     chip_pattern_randomization_enabled flag (which controls only local
     imperfections).
+
+    Per-feature edge perturbation coefficients are generated for gold_holes_v1
+    when enabled via the global edge perturbation parameters and scaled by
+    (1 - chip_pattern_shape_regularity) so that highly regular shapes have
+    minimal boundary roughness.
     """
     chip_enabled = bool(params.get("chip_pattern_enabled", False))
     if not chip_enabled:
@@ -238,11 +334,16 @@ def _build_feature_layout(
     )
 
     randomization_enabled, jitter_std_um, shape_regularity = _get_randomization_settings(params)
+    edge_amp_rel_max, edge_mode_count = _get_edge_perturbation_settings(params)
 
     # Max fractional radius distortion. This determines how "irregular" shapes
     # can become when shape_regularity = 0.
     max_distortion_frac = 0.25  # <= 25% distortion for extreme case
     distortion_frac = max_distortion_frac * (1.0 - shape_regularity)
+
+    # Effective edge perturbation amplitude: scale by (1 - shape_regularity)
+    # so that shape_regularity = 1.0 -> perfectly smooth edges.
+    effective_edge_amp_rel_max = edge_amp_rel_max * (1.0 - shape_regularity)
 
     features_by_cell: Dict[Tuple[int, int], _LatticeFeature] = {}
 
@@ -292,12 +393,27 @@ def _build_feature_layout(
                 r_y_um = nominal_radius_um
                 theta_rad = 0.0
 
+            # Edge perturbation is currently applied only to the nanohole array
+            # (gold_holes_v1). Nanopillars and other models remain smooth unless
+            # explicitly extended in a future feature.
+            if pattern_model == "gold_holes_v1" and effective_edge_amp_rel_max > 0.0:
+                enabled, modes, amp, phase = _sample_edge_perturbation_coefficients(
+                    effective_amp_rel_max=effective_edge_amp_rel_max,
+                    mode_count=edge_mode_count,
+                )
+            else:
+                enabled, modes, amp, phase = False, None, None, None
+
             features_by_cell[(i, j)] = _LatticeFeature(
                 center_x_um=center_x_um,
                 center_y_um=center_y_um,
                 r_x_um=r_x_um,
                 r_y_um=r_y_um,
                 theta_rad=theta_rad,
+                edge_perturbation_enabled=enabled,
+                edge_modes=modes,
+                edge_amp=amp,
+                edge_phase=phase,
             )
 
     return _FeatureLayout(
@@ -332,15 +448,15 @@ def _get_feature_layout_for_params(
 
     Note:
         The randomness used to build a layout (offset, jitter, shape
-        distortion) is driven by the global NumPy RNG. In the dataset
-        generator, np.random.seed is set per video, so each video gets its own
-        randomized layout (including global offset) in a deterministic way for
-        a given seed.
+        distortion, edge perturbation) is driven by the global NumPy RNG. In
+        the dataset generator, np.random.seed is set per video, so each video
+        gets its own randomized layout (including global offset and edge
+        shapes) in a deterministic way for a given seed.
     """
     chip_enabled = bool(params.get("chip_pattern_enabled", False))
     if not chip_enabled:
         # No chip = no layout; return an empty layout so callers can still run.
-        empty_key = ("none", 0.0, 0.0, 0, 0, 0, 0, 0.0, 1.0)
+        empty_key = ("none", 0.0, 0.0, 0, 0, 0, 0, 0.0, 1.0, 0.0, 0)
         layout = _LAYOUT_CACHE.get(empty_key)
         if layout is None:
             layout = _FeatureLayout("none", 1.0, 0.0, {}, 0, -1, 0, -1, 0.0, 0.0)
@@ -352,6 +468,7 @@ def _get_feature_layout_for_params(
     os_factor = float(params.get("psf_oversampling_factor", 1.0))
 
     random_enabled, jitter_std_um, shape_reg = _get_randomization_settings(params)
+    edge_amp_rel_max, edge_mode_count = _get_edge_perturbation_settings(params)
 
     cache_key = (
         pattern_model,
@@ -363,6 +480,8 @@ def _get_feature_layout_for_params(
         bool(random_enabled),
         float(jitter_std_um),
         float(shape_reg),
+        float(edge_amp_rel_max),
+        int(edge_mode_count),
     )
 
     layout = _LAYOUT_CACHE.get(cache_key)
@@ -376,6 +495,79 @@ def _get_feature_layout_for_params(
         _LAYOUT_CACHE[cache_key] = layout
 
     return layout
+
+
+def _compute_feature_boundary_radius(
+    feature: _LatticeFeature,
+    dx_um: float,
+    dy_um: float,
+) -> float:
+    """
+    Compute the boundary radius (in micrometers) for a given feature in the
+    direction specified by (dx_um, dy_um), which are the coordinates of the
+    query point relative to the feature center.
+
+    For features without edge perturbation enabled, the boundary is given by
+    the ellipse defined by (r_x_um, r_y_um) and theta_rad.
+
+    For features with edge perturbation enabled, the boundary radius is
+    modulated by an angular perturbation series δ(θ) constructed from the
+    per-feature coefficients stored on the feature instance.
+
+    The returned value r_boundary_um is the radial distance from the feature
+    center to the perturbed boundary along the direction of (dx_um, dy_um).
+    """
+    # If semi-axes are non-positive, treat as degenerate (no solid area).
+    if feature.r_x_um <= 0.0 or feature.r_y_um <= 0.0:
+        return 0.0
+
+    # Rotate into the ellipse frame if needed.
+    if feature.theta_rad != 0.0:
+        ct = math.cos(-feature.theta_rad)
+        st = math.sin(-feature.theta_rad)
+        ex = ct * dx_um - st * dy_um
+        ey = st * dx_um + ct * dy_um
+    else:
+        ex = dx_um
+        ey = dy_um
+
+    # Direction angle θ in the ellipse frame.
+    theta = math.atan2(ey, ex)
+
+    # Baseline ellipse boundary radius along direction θ.
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    denom = (cos_t / feature.r_x_um) ** 2 + (sin_t / feature.r_y_um) ** 2
+    if denom <= 0.0:
+        # Should not normally happen; fall back to min semi-axis.
+        base_radius = min(feature.r_x_um, feature.r_y_um)
+    else:
+        base_radius = 1.0 / math.sqrt(denom)
+
+    # Edge perturbation disabled or coefficients not present: return baseline.
+    if not feature.edge_perturbation_enabled or feature.edge_modes is None:
+        return base_radius
+
+    modes = feature.edge_modes
+    amp = feature.edge_amp
+    phase = feature.edge_phase
+    if modes is None or amp is None or phase is None:
+        return base_radius
+
+    # Evaluate δ(θ) = Σ_k A_k * cos(k θ + φ_k).
+    # All arrays are small (mode_count ~ 3 by default), so a simple loop is fine.
+    delta = 0.0
+    for k, a_k, phi_k in zip(modes, amp, phase):
+        delta += float(a_k) * math.cos(float(k) * theta + float(phi_k))
+
+    # Ensure the radius remains positive. The sampling strategy keeps |delta|
+    # reasonably small, but we guard against pathological cases.
+    factor = 1.0 + delta
+    if factor <= 0.0:
+        # Clamp to a small positive factor rather than allowing inversion.
+        factor = 0.05
+
+    return base_radius * factor
 
 
 def _classify_point_against_layout(
@@ -394,6 +586,10 @@ def _classify_point_against_layout(
     The global pattern offset is already baked into the feature centers stored
     in the layout. This function assumes x_um, y_um are in the same centered
     pattern coordinates as used for optical maps and trajectories.
+
+    For gold_holes_v1, the feature boundary may include per-hole edge
+    perturbations; for other pattern models, the boundary remains the smooth
+    ellipse defined by r_x_um, r_y_um, and theta_rad.
     """
     pitch_um = layout.pitch_um
     if pitch_um <= 0.0 or not layout.features_by_cell:
@@ -406,8 +602,6 @@ def _classify_point_against_layout(
     # as the jitter remains modest relative to the pitch.
     i0 = int(round(x_um / pitch_um))
     j0 = int(round(y_um / pitch_um))
-
-    inside = False
 
     for di in (-1, 0, 1):
         i = i0 + di
@@ -424,24 +618,16 @@ def _classify_point_against_layout(
             dx = x_um - feature.center_x_um
             dy = y_um - feature.center_y_um
 
-            if feature.theta_rad != 0.0:
-                ct = math.cos(-feature.theta_rad)
-                st = math.sin(-feature.theta_rad)
-                ex = ct * dx - st * dy
-                ey = st * dx + ct * dy
-            else:
-                ex = dx
-                ey = dy
-
-            if feature.r_x_um <= 0.0 or feature.r_y_um <= 0.0:
+            # Compute boundary radius in this direction.
+            r_boundary_um = _compute_feature_boundary_radius(feature, dx, dy)
+            if r_boundary_um <= 0.0:
                 continue
 
-            val = (ex / feature.r_x_um) ** 2 + (ey / feature.r_y_um) ** 2
-            if val <= 1.0:
-                inside = True
-                return inside
+            r_um = math.hypot(dx, dy)
+            if r_um <= r_boundary_um:
+                return True
 
-    return inside
+    return False
 
 
 def _nearest_feature_and_vector(
@@ -577,7 +763,8 @@ def _generate_gold_hole_pattern(
         hole_mask = r_um <= radius_um
         pattern[hole_mask] = hole_intensity_factor
     else:
-        # Use shared feature layout, which includes the global lattice offset.
+        # Use shared feature layout, which includes the global lattice offset
+        # and per-hole edge perturbations (if enabled).
         layout = _get_feature_layout_for_params(
             params=params,
             pattern_model="gold_holes_v1",
@@ -809,9 +996,9 @@ def is_position_in_chip_solid(params: dict, x_nm: float, y_nm: float) -> bool:
     of the configured chip/substrate pattern.
 
     Updated behavior:
-        - Uses the shared feature layout with imperfections and a per-layout
-          global lattice offset, ensuring the geometry matches the optical chip
-          pattern.
+        - Uses the shared feature layout with imperfections, per-hole boundary
+          perturbations (for gold_holes_v1), and a per-layout global lattice
+          offset, ensuring the geometry matches the optical chip pattern.
         - Gold holes:
             solid = gold film (outside holes).
         - Nanopillars:
@@ -887,15 +1074,16 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
     solid region.
 
     Updated behavior:
-        - Uses the same feature layout (with imperfections and global offset) as
-          the classifier.
+        - Uses the same feature layout (with imperfections, per-hole boundary
+          perturbations, and global offset) as the classifier.
         - Gold holes:
             solid -> gold film. We move the point into the nearest hole
             interior by projecting toward the nearest feature's center and
-            placing it just inside the effective feature boundary.
+            placing it just inside the perturbed feature boundary along that
+            direction.
         - Nanopillars:
             solid -> pillar interior. We move the point outward to just
-            outside the effective pillar boundary.
+            outside the effective pillar boundary (currently smooth ellipse).
 
     The projection is approximate for elliptical features but guaranteed to
     end in a fluid region for the current layout and thresholds.
@@ -936,24 +1124,28 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
         if feature is None:
             return float(x_nm), float(y_nm)
 
-        # Use an effective radius to guarantee we end inside the feature for
-        # both circular and modestly elliptical shapes.
-        r_eff_um = min(feature.r_x_um, feature.r_y_um)
+        # Direction from feature center to point.
         dist_um = math.hypot(dx, dy)
         if dist_um == 0.0:
             # If we are exactly at the feature center (unlikely for solid region),
-            # pick an arbitrary direction.
-            dx = r_eff_um
+            # choose an arbitrary direction along +x.
+            dx = feature.r_x_um
             dy = 0.0
-            dist_um = r_eff_um
+            dist_um = feature.r_x_um
 
-        # Target radius just inside the feature.
-        epsilon_um = 1e-3  # 1 nm
-        r_target_um = max(r_eff_um - epsilon_um, 0.0)
-        scale = r_target_um / dist_um
-
-        new_x_um = feature.center_x_um + dx * scale
-        new_y_um = feature.center_y_um + dy * scale
+        # Boundary radius in this direction, using the same perturbed geometry
+        # as the classifier.
+        r_boundary_um = _compute_feature_boundary_radius(feature, dx, dy)
+        if r_boundary_um <= 0.0:
+            # Degenerate case: fall back to minimal movement toward center.
+            new_x_um = feature.center_x_um
+            new_y_um = feature.center_y_um
+        else:
+            epsilon_um = 1e-3  # 1 nm
+            r_target_um = max(r_boundary_um - epsilon_um, 0.0)
+            scale = r_target_um / dist_um
+            new_x_um = feature.center_x_um + dx * scale
+            new_y_um = feature.center_y_um + dy * scale
 
         new_x_nm_centered = new_x_um * 1e3
         new_y_nm_centered = new_y_um * 1e3
@@ -963,8 +1155,9 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
 
         # Safety: ensure projected position is fluid.
         if is_position_in_chip_solid(params, new_x_nm, new_y_nm):
-            # As a fallback, place point at feature center minus epsilon.
-            new_x_um = feature.center_x_um
+            # As a fallback, place point at feature center minus epsilon in +x.
+            fallback_dx = max(feature.r_x_um - 1e-3, 0.0)
+            new_x_um = feature.center_x_um + fallback_dx
             new_y_um = feature.center_y_um
             new_x_nm_centered = new_x_um * 1e3
             new_y_nm_centered = new_y_um * 1e3
@@ -994,17 +1187,21 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
         if feature is None:
             return float(x_nm), float(y_nm)
 
-        r_eff_um = min(feature.r_x_um, feature.r_y_um)
         dist_um = math.hypot(dx, dy)
         epsilon_um = 1e-3  # 1 nm
 
         if dist_um == 0.0:
             # If exactly at center, choose a direction along +x.
-            new_x_um = feature.center_x_um + r_eff_um + epsilon_um
+            # For nanopillars we still use the smooth ellipse boundary.
+            r_boundary_um = _compute_feature_boundary_radius(feature, feature.r_x_um, 0.0)
+            new_x_um = feature.center_x_um + r_boundary_um + epsilon_um
             new_y_um = feature.center_y_um
         else:
-            # Move to just outside the effective radius.
-            r_target_um = r_eff_um + epsilon_um
+            # Move to just outside the boundary along the direction to the point.
+            r_boundary_um = _compute_feature_boundary_radius(feature, dx, dy)
+            if r_boundary_um <= 0.0:
+                r_boundary_um = min(feature.r_x_um, feature.r_y_um)
+            r_target_um = r_boundary_um + epsilon_um
             scale = r_target_um / dist_um
             new_x_um = feature.center_x_um + dx * scale
             new_y_um = feature.center_y_um + dy * scale
@@ -1020,9 +1217,9 @@ def project_position_to_fluid_region(params: dict, x_nm: float, y_nm: float) -> 
             dx2 = new_x_um - feature.center_x_um
             dy2 = new_y_um - feature.center_y_um
             norm2 = math.hypot(dx2, dy2) or 1.0
-            step_um = r_eff_um
-            new_x_um = feature.center_x_um + dx2 / norm2 * (r_eff_um + step_um)
-            new_y_um = feature.center_y_um + dy2 / norm2 * (r_eff_um + step_um)
+            step_um = min(feature.r_x_um, feature.r_y_um)
+            new_x_um = feature.center_x_um + dx2 / norm2 * (r_boundary_um + step_um)
+            new_y_um = feature.center_y_um + dy2 / norm2 * (r_boundary_um + step_um)
             new_x_nm_centered = new_x_um * 1e3
             new_y_nm_centered = new_y_um * 1e3
             new_x_nm = new_x_nm_centered + img_size_nm / 2.0
@@ -1046,8 +1243,9 @@ def generate_reference_and_background_maps(
         - When a chip pattern is enabled, the gold-hole and nanopillar pattern
           generators use the same randomized feature layout that drives
           is_position_in_chip_solid / project_position_to_fluid_region, including
-          a per-layout global lattice offset. Optical backgrounds and Brownian
-          exclusion are therefore geometrically consistent.
+          a per-layout global lattice offset and, for nanoholes, per-hole edge
+          perturbations. Optical backgrounds and Brownian exclusion are therefore
+          geometrically consistent.
     """
     E_ref_amplitude = float(params["reference_field_amplitude"])
     background_intensity = float(params["background_intensity"])
