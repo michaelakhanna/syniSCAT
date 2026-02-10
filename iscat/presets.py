@@ -267,6 +267,44 @@ def create_params_for_instrument(preset_name: str) -> Dict[str, Any]:
     return apply_instrument_preset(base, preset_name)
 
 
+def create_sam2_training_base_params() -> Dict[str, Any]:
+    """
+    Create a baseline PARAMS dictionary for SAM2-style spherical training videos.
+
+    This function centralizes experiment-level constants that are truly fixed
+    across the SAM2 training dataset, such as the optical preset, image size,
+    duration, and basic toggles. Per-video variability (fps, particle counts,
+    diameters, chip pattern usage, noise levels, etc.) is imposed by the
+    dataset generator in dataset_generator._build_sam2_training_params_for_video.
+
+    The baseline is:
+        - Derived from the '60x_nikon' instrument preset for consistency with
+          the existing Nikon configuration (image size is overridden to 1024).
+        - Uses water as the medium and standard chip pattern defaults.
+        - Enables mask generation and trackability.
+
+    Returns:
+        Dict[str, Any]: A new parameter dictionary with SAM2 baseline settings.
+    """
+    base = deepcopy(PARAMS)
+    params = apply_instrument_preset(base, "60x_nikon")
+
+    # Override image size to 1024x1024 for the SAM2 training dataset.
+    params["image_size_pixels"] = 1024
+
+    # Ensure duration is set to 3 seconds; fps will be overridden per video.
+    params["duration_seconds"] = 3.0
+
+    # Ensure mask generation and trackability are enabled by default.
+    params["mask_generation_enabled"] = True
+    params["trackability_enabled"] = True
+
+    # Keep existing chip pattern defaults; the dataset generator will decide
+    # per-video whether chip_pattern_enabled is True or False and will
+    # override chip_pattern_dimensions when needed.
+    return params
+
+
 # ---------------------------------------------------------------------------
 # Experiment preset implementations
 # ---------------------------------------------------------------------------

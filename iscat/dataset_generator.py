@@ -1,4 +1,5 @@
 # File: dataset_generator.py
+
 """
 High-level dataset generation wrapper for the iSCAT simulation.
 
@@ -100,7 +101,7 @@ def _build_sam2_training_params_for_video(
           training (image size, NA, wavelength, duration, etc.).
         - Samples per-video parameters from well-defined distributions:
             * fps: 90% 30 Hz, 10% 24 Hz; exposure_time_ms = 1000 / fps.
-            * duration_seconds: fixed 3.0 s (72 or 90 frames).
+            * duration_seconds: fixed 3.0 s.
             * num_particles: 30% -> 1, 60% -> 2, 10% -> 3.
             * particle_diameters_nm: per-video mean mu ~ U(150, 300) nm,
               per-particle Gaussian N(mu, 30^2), hard-clamped to [150, 300].
@@ -108,7 +109,7 @@ def _build_sam2_training_params_for_video(
             * particle_refractive_indices: per-particle complex n interpolated
               between PET and Gold at 635 nm with small jitter.
             * particle_materials: None (indices are explicit).
-            * particle_signal_multipliers: all 1.0.
+            * particle_signal_multipliers: all 0.3 (fixed).
             * chip_pattern_enabled: 70% True, 30% False; when True, use
               gold_holes_v1 with randomized hole_diameter_um and
               hole_edge_to_edge_spacing_um in the specified ranges.
@@ -117,46 +118,51 @@ def _build_sam2_training_params_for_video(
             * read_noise_std, background_intensity, and
               chip_pattern_contrast_amplitude sampled from the specified
               uniform ranges.
-        - Leaves the core physics and rendering pipeline unchanged.
+        - Leaves the core physics and rendering pipeline unchanged, and
+          defaults any unspecified parameters to values from the base preset
+          (which should be aligned with config.PARAMS).
 
     The returned dict is ready to be passed directly to run_simulation.
     """
-    # Start from a dedicated SAM2 base preset so that truly constant aspects
-    # (optics, duration, NA, etc.) are centralized and kept consistent.
+    # Start from a dedicated SAM2 base preset so constant aspects
+    # (optics, duration, NA, etc.) are centralized.
     params = create_sam2_training_base_params()
 
-    # --- Global constants for this dataset (per video) -----------------------
-    # Ensure we are in the desired optical configuration.
+    # ---------------------------------------------------------------------
+    # Constants and overrides for this dataset
+    # ---------------------------------------------------------------------
+
+    # Image geometry: always 1024 x 1024, 600 nm pixels.
     params["image_size_pixels"] = 1024
-    # Keep pixel_size_nm from the base preset (derived from 60x Nikon config).
+    params["pixel_size_nm"] = 600.0
+
+    # Optics: fixed wavelength and NA for this dataset.
     params["wavelength_nm"] = 635.0
     params["numerical_aperture"] = 1.2
     params["magnification"] = 60
     params["refractive_index_medium"] = 1.33
-    # Override immersion index to the dataset-specific value.
     params["refractive_index_immersion"] = 1.515
+
+    # Duration and bit depth.
     params["duration_seconds"] = 3.0
     params["bit_depth"] = 16
 
+    # Mask / trackability configuration.
     params["mask_generation_enabled"] = True
     params["trackability_enabled"] = True
     params["trackability_confidence_threshold"] = 0.2
 
-    # Constrain z-motion with a reflective boundary near the surface.
+    # Motion model.
     params["z_motion_constraint_model"] = "reflective_boundary_v1"
-
-    # Keep existing z-stack step; it is already 50 nm in config.
     params["z_stack_step_nm"] = 50.0
 
-    # Motion blur: enabled with 4 subsamples.
+    # Motion blur.
     params["motion_blur_enabled"] = True
     params["motion_blur_subsamples"] = 4
 
-    # Rotational diffusion is irrelevant for strictly spherical particles but
-    # we keep the default setting; the PSF for a sphere is rotationally
-    # symmetric.
     # ---------------------------------------------------------------------
     # FPS and exposure-time distribution
+    # ---------------------------------------------------------------------
     u_fps = float(rng.random())
     if u_fps < 0.9:
         fps = 30.0
@@ -167,6 +173,7 @@ def _build_sam2_training_params_for_video(
 
     # ---------------------------------------------------------------------
     # Background subtraction method
+    # ---------------------------------------------------------------------
     v_bg = float(rng.random())
     if v_bg < 0.6:
         params["background_subtraction_method"] = "video_median"
@@ -175,6 +182,7 @@ def _build_sam2_training_params_for_video(
 
     # ---------------------------------------------------------------------
     # Number of particles per video
+    # ---------------------------------------------------------------------
     w_np = float(rng.random())
     if w_np < 0.30:
         num_particles = 1
@@ -186,10 +194,12 @@ def _build_sam2_training_params_for_video(
 
     # ---------------------------------------------------------------------
     # Particle shape models: spherical only for this dataset.
+    # ---------------------------------------------------------------------
     params["particle_shape_models"] = ["spherical"] * num_particles
 
     # ---------------------------------------------------------------------
     # Particle diameters: per-video Gaussian around a uniform mean.
+    # ---------------------------------------------------------------------
     mu_d = float(rng.uniform(150.0, 300.0))
     sigma_d = 30.0
 
@@ -204,13 +214,12 @@ def _build_sam2_training_params_for_video(
             d = d_raw
         diameters.append(d)
     params["particle_diameters_nm"] = diameters
-
-    # Keep translational diameters coupled to optical diameters for now by
-    # omitting particle_translational_diameters_nm.
+    # Translational diameters default to optical diameters when omitted,
+    # which is what you want here.
 
     # ---------------------------------------------------------------------
-    # Refractive indices / materials:
-    # Build a continuous distribution between PET and Gold at 635 nm.
+    # Refractive indices: interpolate between PET and Gold at 635 nm.
+    # ---------------------------------------------------------------------
     wavelength_nm = float(params["wavelength_nm"])
 
     n_pet = lookup_refractive_index("PET", wavelength_nm=wavelength_nm)
@@ -234,15 +243,17 @@ def _build_sam2_training_params_for_video(
         particle_indices.append(complex(real_clamped, imag_clamped))
 
     params["particle_refractive_indices"] = particle_indices
-    # Explicit indices override any material labels; we set materials to None.
+    # Explicit indices override any material labels; materials are None.
     params["particle_materials"] = [None] * num_particles
 
     # ---------------------------------------------------------------------
-    # Particle brightness: fixed nominal multiplier.
-    params["particle_signal_multipliers"] = [1.0] * num_particles
+    # Particle brightness: fixed nominal multiplier 0.3 for all particles.
+    # ---------------------------------------------------------------------
+    params["particle_signal_multipliers"] = [0.3] * num_particles
 
     # ---------------------------------------------------------------------
     # Chip pattern usage and geometry
+    # ---------------------------------------------------------------------
     c_chip = float(rng.random())
     if c_chip < 0.7:
         chip_enabled = True
@@ -256,8 +267,8 @@ def _build_sam2_training_params_for_video(
         params["chip_substrate_preset"] = "default_gold_holes"
         params["background_fluorescence_enabled"] = False
 
-        # Start from the baseline chip dimensions and override the fields
-        # that should vary per video.
+        # Start from the baseline chip dimensions from global PARAMS and
+        # override the fields that vary per video.
         base_chip_dims = deepcopy(PARAMS.get("chip_pattern_dimensions", {}))
         hole_diameter_um = float(rng.uniform(15.0, 90.0))
         hole_spacing_um = float(rng.uniform(2.0, 14.0))
@@ -292,6 +303,7 @@ def _build_sam2_training_params_for_video(
 
     # ---------------------------------------------------------------------
     # Noise and background parameters
+    # ---------------------------------------------------------------------
     read_noise_std = float(rng.uniform(3.0, 9.0))
     background_intensity = float(rng.uniform(75.0, 125.0))
     chip_contrast_amp = float(rng.uniform(0.4, 0.7))
@@ -300,9 +312,11 @@ def _build_sam2_training_params_for_video(
     params["background_intensity"] = background_intensity
     params["chip_pattern_contrast_amplitude"] = chip_contrast_amp
 
-    # Keep existing noise toggles and shot noise scaling.
+    # Keep existing noise toggles and shot noise scaling from global PARAMS.
     params["shot_noise_enabled"] = PARAMS.get("shot_noise_enabled", True)
-    params["shot_noise_scaling_factor"] = PARAMS.get("shot_noise_scaling_factor", 1.0)
+    params["shot_noise_scaling_factor"] = PARAMS.get(
+        "shot_noise_scaling_factor", 1.0
+    )
     params["gaussian_noise_enabled"] = PARAMS.get("gaussian_noise_enabled", True)
 
     # Ensure mask path is set by the caller; we do not set output_filename
