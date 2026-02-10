@@ -103,8 +103,8 @@ def _build_sam2_training_params_for_video(
             * fps: 90% 30 Hz, 10% 24 Hz; exposure_time_ms = 1000 / fps.
             * duration_seconds: fixed 3.0 s.
             * num_particles: 30% -> 1, 60% -> 2, 10% -> 3.
-            * particle_diameters_nm: per-video mean mu ~ U(150, 300) nm,
-              per-particle Gaussian N(mu, 30^2), hard-clamped to [150, 300].
+            * particle_diameters_nm: per-video mean mu ~ U(100, 180) nm,
+              per-particle Gaussian N(mu, 30^2), hard-clamped to [100, 180].
             * particle_shape_models: all "spherical".
             * particle_refractive_indices: per-particle complex n interpolated
               between PET and Gold at 635 nm with small jitter.
@@ -119,20 +119,20 @@ def _build_sam2_training_params_for_video(
               chip_pattern_contrast_amplitude sampled from the specified
               uniform ranges.
         - Leaves the core physics and rendering pipeline unchanged, and
-          defaults any unspecified parameters to values from the base preset
-          (which should be aligned with config.PARAMS).
+          defaults any unspecified parameters to values from config.PARAMS
+          (not from any Nikon preset).
 
     The returned dict is ready to be passed directly to run_simulation.
     """
-    # Start from a dedicated SAM2 base preset so constant aspects
-    # (optics, duration, NA, etc.) are centralized.
-    params = create_sam2_training_base_params()
+    # Start from a copy of the canonical config.PARAMS so we do NOT inherit
+    # any hidden Nikon-specific defaults. Then override per-dataset settings.
+    params = deepcopy(PARAMS)
 
     # ---------------------------------------------------------------------
     # Constants and overrides for this dataset
     # ---------------------------------------------------------------------
 
-    # Image geometry: always 1024 x 1024, 600 nm pixels.
+    # Image geometry: always 1024 x 1024, 600 nm pixels (from PARAMS).
     params["image_size_pixels"] = 1024
     params["pixel_size_nm"] = 600.0
 
@@ -159,6 +159,9 @@ def _build_sam2_training_params_for_video(
     # Motion blur.
     params["motion_blur_enabled"] = True
     params["motion_blur_subsamples"] = 4
+
+    # Apodization factor for SAM2: override config value to 2.2.
+    params["apodization_factor"] = 2.2
 
     # ---------------------------------------------------------------------
     # FPS and exposure-time distribution
@@ -199,23 +202,23 @@ def _build_sam2_training_params_for_video(
 
     # ---------------------------------------------------------------------
     # Particle diameters: per-video Gaussian around a uniform mean.
+    # New range: [100, 180] nm, not [150, 300].
     # ---------------------------------------------------------------------
-    mu_d = float(rng.uniform(150.0, 300.0))
+    mu_d = float(rng.uniform(100.0, 180.0))
     sigma_d = 30.0
 
     diameters: List[float] = []
     for _ in range(num_particles):
         d_raw = float(rng.normal(mu_d, sigma_d))
-        if d_raw < 150.0:
-            d = 150.0
-        elif d_raw > 300.0:
-            d = 300.0
+        if d_raw < 100.0:
+            d = 100.0
+        elif d_raw > 180.0:
+            d = 180.0
         else:
             d = d_raw
         diameters.append(d)
     params["particle_diameters_nm"] = diameters
-    # Translational diameters default to optical diameters when omitted,
-    # which is what you want here.
+    # Translational diameters default to optical diameters when omitted.
 
     # ---------------------------------------------------------------------
     # Refractive indices: interpolate between PET and Gold at 635 nm.
@@ -275,7 +278,6 @@ def _build_sam2_training_params_for_video(
 
         base_chip_dims["hole_diameter_um"] = hole_diameter_um
         base_chip_dims["hole_edge_to_edge_spacing_um"] = hole_spacing_um
-        # Keep the default 20 nm depth from the config for this dataset.
         base_chip_dims["hole_depth_nm"] = 20.0
 
         params["chip_pattern_dimensions"] = base_chip_dims
@@ -284,7 +286,7 @@ def _build_sam2_training_params_for_video(
         params["chip_substrate_preset"] = "empty_background"
         params["background_fluorescence_enabled"] = False
 
-    # Keep chip pattern randomization controls as in the base config.
+    # Keep chip pattern randomization controls as in the base PARAMS config.
     params["chip_pattern_randomization_enabled"] = PARAMS.get(
         "chip_pattern_randomization_enabled", True
     )
@@ -304,7 +306,9 @@ def _build_sam2_training_params_for_video(
     # ---------------------------------------------------------------------
     # Noise and background parameters
     # ---------------------------------------------------------------------
-    read_noise_std = float(rng.uniform(3.0, 9.0))
+    # Increase the *lowest* amount of noise by 1 std relative to previous [3, 9].
+    # New range: [4, 9].
+    read_noise_std = float(rng.uniform(4.0, 9.0))
     background_intensity = float(rng.uniform(75.0, 125.0))
     chip_contrast_amp = float(rng.uniform(0.4, 0.7))
 
