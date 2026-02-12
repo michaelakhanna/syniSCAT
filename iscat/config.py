@@ -11,7 +11,7 @@ PARAMS = {
     # Physical side length of a single camera pixel in nanometers.
     # Must be a positive float. Typical values are ~100–600 nm depending on the
     # objective and camera pixel pitch.
-    "pixel_size_nm": 600,
+    "pixel_size_nm": 244,
 
     # Frame rate (frames per second) of the output video.
     # Positive float or int. Combined with duration_seconds determines the
@@ -127,7 +127,7 @@ PARAMS = {
     #
     # Translational Brownian motion does **not** read this field directly; it
     # uses translational diameters resolved via resolve_translational_diameters_nm.
-    "particle_diameters_nm": [100, 200],
+    "particle_diameters_nm": [100, 100],
 
     # Optional translational equivalent diameters in nanometers (HYDRODYNAMIC).
     #
@@ -187,7 +187,7 @@ PARAMS = {
     #   0.0 -> particle effectively "off" (no scattered signal).
     #   1.0 -> nominal brightness.
     #  >1.0 -> brighter than nominal.
-    "particle_signal_multipliers": [0.3, 0.3],
+    "particle_signal_multipliers": [0.5, 0.5],
 
     # Optional explicit initial positions for each particle in nanometers.
     # If provided, must be an array-like of shape (num_particles, 3),
@@ -201,7 +201,7 @@ PARAMS = {
     # (Docstring unchanged from previous version; omitted here for brevity.)
     "particle_shape_models": [
         "spherical",   # particle 0: simple sphere
-        "h2o_like",    # particle 1: rigid composite defined below
+        "spherical",    # particle 1: rigid composite defined below
     ],
 
     # Library of named composite particle geometries.
@@ -259,7 +259,7 @@ PARAMS = {
     "shot_noise_enabled": True,
     "shot_noise_scaling_factor": 1.00,
     "gaussian_noise_enabled": True,
-    "read_noise_std": 7,
+    "read_noise_std": 4,
     "background_subtraction_method": "video_median",
 
     # --- MOTION BLUR ---
