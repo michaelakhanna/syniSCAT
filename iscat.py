@@ -13,7 +13,7 @@ import warnings
 
 # Suppress RankWarning from polyfit
 warnings.filterwarnings("ignore", category=np.RankWarning)
-
+print("Starting iSCAT simulation...")
 # --- SIMULATION PARAMETERS ---
 PARAMS = {
     # --- IMAGE & VIDEO ---
