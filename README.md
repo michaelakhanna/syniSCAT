@@ -1,4 +1,5 @@
 [![DOI](https://zenodo.org/badge/1130729031.svg)](https://doi.org/10.5281/zenodo.18617286)
+https://zenodo.org/records/18634740
 
 SyniSCAT is a Python-based simulation pipeline designed to generate synthetic datasets for Interferometric Scattering (iSCAT) microscopy. It provides a framework for creating large-scale training data for deep learning models (such as Transformers) by simulating the optical scattering of non-spherical particles and complex background noise.
 
