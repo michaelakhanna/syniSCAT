@@ -12,12 +12,9 @@ Data Pipeline: Automates the generation of full video sequences paired with grou
 
 
 
-Michael A Khanna; Ndukaife Lab at Vanderbilt
-
+Michael A Khanna; Vanderbilt University
 Under Suprivision of Dr. Justus Ndukaife 
 
-
-Under Suprivision of Dr. Justus Ndukaife
 
 ```markdown
 # iSCAT Video Simulation – Conda Setup
