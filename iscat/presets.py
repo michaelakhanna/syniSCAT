@@ -46,7 +46,7 @@ Design notes
 # ---------------------------------------------------------------------------
 
 INSTRUMENT_PRESETS: Dict[str, Dict[str, Any]] = {
-    # Nikon 60x objective preset.
+    # 60x objective preset.
     #
     # This preset is based on the example in the CDD:
     #   - magnification: 60
