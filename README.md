@@ -9,9 +9,6 @@ Key Features:
 - **Defect Modeling**: Explicitly simulates lithography artifacts, including nano-hole irregularities, edge roughness, and "double-dipping" effects.
 - **Data Pipeline**: Automates the generation of full video sequences paired with ground-truth segmentation masks.
 
-Michael A Khanna; Vanderbilt University  
-Under Supervision of Dr. Justus Ndukaife
-
 # iSCAT Video Simulation – Conda Setup
 
 1. Install Conda (Miniconda or Anaconda), if you don’t already have it:
@@ -50,4 +47,6 @@ Under Supervision of Dr. Justus Ndukaife
 
 Additional record on Zenodo:  
 https://zenodo.org/records/18634740
+
+Michael A Khanna
 ```
