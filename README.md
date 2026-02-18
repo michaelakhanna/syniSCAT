@@ -49,4 +49,3 @@ Additional record on Zenodo:
 https://zenodo.org/records/18634740
 
 Michael A Khanna
-```
